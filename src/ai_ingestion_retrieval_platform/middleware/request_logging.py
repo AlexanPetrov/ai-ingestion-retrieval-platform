@@ -5,6 +5,11 @@ import structlog
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from ai_ingestion_retrieval_platform.core.metrics import (
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_TOTAL,
+)
+
 logger = structlog.get_logger()
 
 
@@ -30,7 +35,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
 
         except Exception:
-            elapsed_ms = round((perf_counter() - start) * 1000, 2)
+            elapsed_seconds = perf_counter() - start
+            elapsed_ms = round(elapsed_seconds * 1000, 2)
 
             logger.exception(
                 "request_failed",
@@ -40,7 +46,19 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             )
             raise
 
-        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        elapsed_seconds = perf_counter() - start
+        elapsed_ms = round(elapsed_seconds * 1000, 2)
+
+        HTTP_REQUESTS_TOTAL.labels(
+            method=request.method,
+            path=request.url.path,
+            status_code=str(response.status_code),
+        ).inc()
+
+        HTTP_REQUEST_DURATION_SECONDS.labels(
+            method=request.method,
+            path=request.url.path,
+        ).observe(elapsed_seconds)
 
         logger.info(
             "request_completed",

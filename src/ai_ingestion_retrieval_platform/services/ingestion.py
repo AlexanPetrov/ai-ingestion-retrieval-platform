@@ -12,14 +12,21 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from ai_ingestion_retrieval_platform.core.config import get_settings
 from ai_ingestion_retrieval_platform.core.http_client import get_http_client
+from ai_ingestion_retrieval_platform.core.metrics import (
+    INGESTION_BATCH_DURATION_SECONDS,
+    INGESTION_BATCH_PREVIEW_TOTAL,
+    INGESTION_URL_PREVIEW_TOTAL,
+)
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionBatchResult,
+    UrlIngestionError,
     UrlIngestionPreview,
 )
 
-
 logger = structlog.get_logger()
+settings = get_settings()
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -37,10 +44,44 @@ def is_retryable_exception(exc: BaseException) -> bool:
     return False
 
 
+def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
+    if exc.status_code == 504:
+        return UrlIngestionError(
+            code="timeout",
+            message=str(exc.detail),
+            status_code=exc.status_code,
+        )
+
+    if exc.status_code == 502:
+        detail = str(exc.detail)
+
+        if "HTTP" in detail:
+            return UrlIngestionError(
+                code="http_status",
+                message=detail,
+                status_code=exc.status_code,
+            )
+
+        return UrlIngestionError(
+            code="network_error",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    return UrlIngestionError(
+        code="unknown_error",
+        message=str(exc.detail),
+        status_code=exc.status_code,
+    )
+
+
 @retry(
     retry=retry_if_exception(is_retryable_exception),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential_jitter(initial=0.5, max=4.0),
+    stop=stop_after_attempt(settings.retry_attempts),
+    wait=wait_exponential_jitter(
+        initial=settings.retry_backoff_initial_seconds,
+        max=settings.retry_backoff_max_seconds,
+    ),
     reraise=True,
 )
 async def fetch_url(client: httpx.AsyncClient, url: str) -> httpx.Response:
@@ -67,6 +108,7 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
             error_type="timeout",
             elapsed_ms=elapsed_ms,
         )
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         raise HTTPException(
             status_code=504,
             detail="URL fetch timed out",
@@ -74,16 +116,19 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
 
     except httpx.HTTPStatusError as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        upstream_status_code = exc.response.status_code
+
         logger.warning(
             "url_preview_failed",
             url=url_str,
             error_type="http_status",
-            status_code=exc.response.status_code,
+            upstream_status_code=upstream_status_code,
             elapsed_ms=elapsed_ms,
         )
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         raise HTTPException(
             status_code=502,
-            detail=f"URL returned HTTP {exc.response.status_code}",
+            detail=f"URL returned HTTP {upstream_status_code}",
         ) from exc
 
     except httpx.HTTPError as exc:
@@ -91,9 +136,10 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
         logger.warning(
             "url_preview_failed",
             url=url_str,
-            error_type="http_error",
+            error_type="network_error",
             elapsed_ms=elapsed_ms,
         )
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         raise HTTPException(
             status_code=502,
             detail="URL fetch failed",
@@ -108,6 +154,8 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
         content_length=len(response.content),
         elapsed_ms=elapsed_ms,
     )
+
+    INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
 
     return UrlIngestionPreview(
         url=url_str,
@@ -147,14 +195,22 @@ async def preview_urls(
                     url=str(url),
                     success=False,
                     data=None,
-                    error=str(exc.detail),
+                    error=build_ingestion_error(exc),
                 )
 
     results = await asyncio.gather(*(preview_with_limit(url) for url in urls))
 
-    elapsed_ms = round((perf_counter() - start) * 1000, 2)
+    elapsed_seconds = perf_counter() - start
+    elapsed_ms = round(elapsed_seconds * 1000, 2)
     success_count = sum(1 for result in results if result.success)
     failure_count = len(results) - success_count
+
+    if failure_count:
+        INGESTION_BATCH_PREVIEW_TOTAL.labels(result="partial_failure").inc()
+    else:
+        INGESTION_BATCH_PREVIEW_TOTAL.labels(result="success").inc()
+
+    INGESTION_BATCH_DURATION_SECONDS.observe(elapsed_seconds)
 
     logger.info(
         "batch_preview_completed",

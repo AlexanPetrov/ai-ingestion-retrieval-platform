@@ -27,3 +27,11 @@ build-backend = "uv_build"
 dev = [
     "ruff>=0.15.15",
 ]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]

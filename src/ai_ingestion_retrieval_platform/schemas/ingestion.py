@@ -1,5 +1,9 @@
 from pydantic import AnyHttpUrl, BaseModel, Field
 
+from ai_ingestion_retrieval_platform.core.config import get_settings
+
+settings = get_settings()
+
 
 class UrlIngestionRequest(BaseModel):
     url: AnyHttpUrl = Field(
@@ -16,9 +20,9 @@ class BatchUrlIngestionRequest(BaseModel):
         description="Public URLs to fetch for ingestion preview.",
     )
     max_concurrency: int = Field(
-        default=3,
+        default=settings.default_max_concurrency,
         ge=1,
-        le=10,
+        le=settings.max_allowed_concurrency,
         description="Maximum number of URLs fetched at the same time.",
     )
 
@@ -32,8 +36,14 @@ class UrlIngestionPreview(BaseModel):
     preview: str
 
 
+class UrlIngestionError(BaseModel):
+    code: str
+    message: str
+    status_code: int | None = None
+
+
 class UrlIngestionBatchResult(BaseModel):
     url: str
     success: bool
     data: UrlIngestionPreview | None
-    error: str | None
+    error: UrlIngestionError | None
