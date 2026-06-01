@@ -1,0 +1,29 @@
+[project]
+name = "ai-ingestion-retrieval-platform"
+version = "0.1.0"
+description = "Production-grade AI ingestion and retrieval platform built with FastAPI, async Python, and distributed backend patterns."
+readme = "README.md"
+authors = [
+    { name = "Alexander Petrovski", email = "apfb11@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]>=0.136.3",
+    "httpx>=0.28.1",
+    "prometheus-client>=0.25.0",
+    "pydantic-settings>=2.14.1",
+    "structlog>=25.5.0",
+    "tenacity>=9.1.4",
+]
+
+[project.scripts]
+ai-ingestion-retrieval-platform = "ai_ingestion_retrieval_platform:main"
+
+[build-system]
+requires = ["uv_build>=0.9.8,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.15",
+]

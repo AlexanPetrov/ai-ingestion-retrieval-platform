@@ -1,0 +1,18 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# macOS
+.DS_Store
+
+# Personal/local files
+*.pages
