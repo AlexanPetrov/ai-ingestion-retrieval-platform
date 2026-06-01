@@ -39,34 +39,45 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 
 ## Setup
 
-git clone https://github.com/<YOUR_USERNAME>/ai-ingestion-retrieval-platform.git
+```bash
+git clone https://github.com/apfb11/ai-ingestion-retrieval-platform.git
 cd ai-ingestion-retrieval-platform
 uv sync
 PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:app --reload
-
-## API Docs
-
-http://127.0.0.1:8000/docs 
-
-## Metrics
-
-http://127.0.0.1:8000/metrics 
+```
 
 ## Project Structure
 
-src/ 
-└── ai_ingestion_retrieval_platform     
-    ├── api     
-    │   └── routes     
-    ├── core     
-    ├── middleware     
-    ├── schemas     
-    ├── services     
-    └── main.py 
+```text
+src/
+└── ai_ingestion_retrieval_platform/
+    ├── api/
+    │   └── routes/
+    ├── core/
+    ├── middleware/
+    ├── schemas/
+    ├── services/
+    └── main.py
+```
+
+## API Docs
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## Metrics
+
+```text
+http://127.0.0.1:8000/metrics
+```
 
 ## Development
 
-uv run ruff format . uv run ruff check . --fix 
+```bash
+uv run ruff format .
+uv run ruff check . --fix
+```
 
 ## Status
 
@@ -84,3 +95,4 @@ Next phase:
 - PostgreSQL
 - pgvector
 - retrieval pipeline architecture
+
