@@ -14,7 +14,12 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 ## Current Features
 
 - Async URL ingestion
+- SSRF-safe URL validation
+- Private/internal IP blocking
+- Redirect validation
+- Response size limits
 - Bounded concurrency
+- Global outbound fetch limiting
 - Shared async HTTP client lifecycle
 - Connection pooling
 - Retry/backoff handling
@@ -23,7 +28,9 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 - Structured JSON logging
 - Request correlation IDs
 - Prometheus metrics
+- Failure-path request metrics
 - Typed ingestion errors
+- ASGI request middleware
 - Config-driven runtime settings
 
 ## Stack
@@ -62,15 +69,11 @@ src/
 
 ## API Docs
 
-```text
 http://127.0.0.1:8000/docs
-```
 
 ## Metrics
 
-```text
 http://127.0.0.1:8000/metrics
-```
 
 ## Development
 
@@ -95,4 +98,6 @@ Next phase:
 - PostgreSQL
 - pgvector
 - retrieval pipeline architecture
-
+- dependency injection cleanup
+- phase-specific timeout tuning
+- metrics endpoint hardening
