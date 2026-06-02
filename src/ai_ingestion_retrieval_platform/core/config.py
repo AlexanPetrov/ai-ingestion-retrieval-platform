@@ -14,12 +14,16 @@ class Settings(BaseSettings):
     app_name: str = "AI Ingestion & Retrieval Platform"
 
     http_timeout_seconds: float = Field(default=5.0, gt=0)
+    max_redirects: int = Field(default=5, ge=0)
+    max_preview_bytes: int = Field(default=65_536, ge=1)
+
     retry_attempts: int = Field(default=3, ge=1)
     retry_backoff_initial_seconds: float = Field(default=0.5, gt=0)
     retry_backoff_max_seconds: float = Field(default=4.0, gt=0)
 
     default_max_concurrency: int = Field(default=3, ge=1)
     max_allowed_concurrency: int = Field(default=10, ge=1)
+    global_max_outbound_fetches: int = Field(default=20, ge=1)
 
 
 @lru_cache

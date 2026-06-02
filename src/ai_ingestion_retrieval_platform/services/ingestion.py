@@ -14,11 +14,13 @@ from tenacity import (
 
 from ai_ingestion_retrieval_platform.core.config import get_settings
 from ai_ingestion_retrieval_platform.core.http_client import get_http_client
+from ai_ingestion_retrieval_platform.core.limits import outbound_fetch_limiter
 from ai_ingestion_retrieval_platform.core.metrics import (
     INGESTION_BATCH_DURATION_SECONDS,
     INGESTION_BATCH_PREVIEW_TOTAL,
     INGESTION_URL_PREVIEW_TOTAL,
 )
+from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionBatchResult,
     UrlIngestionError,
@@ -29,6 +31,11 @@ logger = structlog.get_logger()
 settings = get_settings()
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+ERROR_TOO_MANY_REDIRECTS = "Too many redirects"
+ERROR_REDIRECT_MISSING_LOCATION = "Redirect response missing Location header"
+ERROR_TIMEOUT = "URL fetch timed out"
+ERROR_FETCH_FAILED = "URL fetch failed"
 
 
 def is_retryable_exception(exc: BaseException) -> bool:
@@ -45,16 +52,37 @@ def is_retryable_exception(exc: BaseException) -> bool:
 
 
 def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
+    detail = str(exc.detail)
+
+    if detail == ERROR_TOO_MANY_REDIRECTS:
+        return UrlIngestionError(
+            code="too_many_redirects",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if detail == ERROR_REDIRECT_MISSING_LOCATION:
+        return UrlIngestionError(
+            code="redirect_error",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if exc.status_code == 400:
+        return UrlIngestionError(
+            code="unsafe_url",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
     if exc.status_code == 504:
         return UrlIngestionError(
             code="timeout",
-            message=str(exc.detail),
+            message=detail,
             status_code=exc.status_code,
         )
 
     if exc.status_code == 502:
-        detail = str(exc.detail)
-
         if "HTTP" in detail:
             return UrlIngestionError(
                 code="http_status",
@@ -70,7 +98,7 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
 
     return UrlIngestionError(
         code="unknown_error",
-        message=str(exc.detail),
+        message=detail,
         status_code=exc.status_code,
     )
 
@@ -85,9 +113,44 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
     reraise=True,
 )
 async def fetch_url(client: httpx.AsyncClient, url: str) -> httpx.Response:
-    response = await client.get(url)
-    response.raise_for_status()
-    return response
+    async with outbound_fetch_limiter:
+        current_url = url
+
+        for _ in range(settings.max_redirects + 1):
+            await validate_url_is_safe(current_url)
+
+            async with client.stream("GET", current_url) as response:
+                if response.is_redirect:
+                    redirect_url = response.headers.get("location")
+
+                    if not redirect_url:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=ERROR_REDIRECT_MISSING_LOCATION,
+                        )
+
+                    current_url = str(response.url.join(redirect_url))
+                    continue
+
+                response.raise_for_status()
+
+                body = bytearray()
+
+                async for chunk in response.aiter_bytes():
+                    remaining = settings.max_preview_bytes - len(body)
+
+                    if remaining <= 0:
+                        break
+
+                    body.extend(chunk[:remaining])
+
+                response._content = bytes(body)
+                return response
+
+        raise HTTPException(
+            status_code=400,
+            detail=ERROR_TOO_MANY_REDIRECTS,
+        )
 
 
 async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
@@ -100,18 +163,22 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
         client = get_http_client()
         response = await fetch_url(client, url_str)
 
+    except HTTPException:
+        raise
+
     except httpx.TimeoutException as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+
         logger.warning(
             "url_preview_failed",
             url=url_str,
             error_type="timeout",
             elapsed_ms=elapsed_ms,
         )
-        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
         raise HTTPException(
             status_code=504,
-            detail="URL fetch timed out",
+            detail=ERROR_TIMEOUT,
         ) from exc
 
     except httpx.HTTPStatusError as exc:
@@ -125,7 +192,7 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
             upstream_status_code=upstream_status_code,
             elapsed_ms=elapsed_ms,
         )
-        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
         raise HTTPException(
             status_code=502,
             detail=f"URL returned HTTP {upstream_status_code}",
@@ -133,16 +200,17 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
 
     except httpx.HTTPError as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+
         logger.warning(
             "url_preview_failed",
             url=url_str,
             error_type="network_error",
             elapsed_ms=elapsed_ms,
         )
-        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
         raise HTTPException(
             status_code=502,
-            detail="URL fetch failed",
+            detail=ERROR_FETCH_FAILED,
         ) from exc
 
     elapsed_ms = round((perf_counter() - start) * 1000, 2)
@@ -154,8 +222,6 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
         content_length=len(response.content),
         elapsed_ms=elapsed_ms,
     )
-
-    INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
 
     return UrlIngestionPreview(
         url=url_str,
@@ -184,13 +250,19 @@ async def preview_urls(
         async with semaphore:
             try:
                 preview = await preview_url(url)
+
+                INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
+
                 return UrlIngestionBatchResult(
                     url=str(url),
                     success=True,
                     data=preview,
                     error=None,
                 )
+
             except HTTPException as exc:
+                INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
                 return UrlIngestionBatchResult(
                     url=str(url),
                     success=False,
@@ -202,6 +274,7 @@ async def preview_urls(
 
     elapsed_seconds = perf_counter() - start
     elapsed_ms = round(elapsed_seconds * 1000, 2)
+
     success_count = sum(1 for result in results if result.success)
     failure_count = len(results) - success_count
 

@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(settings.http_timeout_seconds),
-        follow_redirects=True,
+        follow_redirects=False,
     ) as client:
         set_http_client(client)
         yield
