@@ -16,3 +16,9 @@ wheels/
 
 # Personal/local files
 *.pages
+
+# Testing/cache
+.coverage
+.pytest_cache/
+.ruff_cache/
+htmlcov/
