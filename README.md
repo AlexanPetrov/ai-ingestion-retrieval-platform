@@ -43,6 +43,11 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 - pydantic-settings
 - tenacity
 - Ruff
+- pytest
+- pytest-asyncio
+- pytest-cov
+- pytest-mock
+- respx
 
 ## Setup
 
@@ -82,6 +87,12 @@ uv run ruff format .
 uv run ruff check . --fix
 ```
 
+## Testing
+
+```bash
+uv run pytest
+```
+
 ## Status
 
 Current focus:
@@ -94,10 +105,10 @@ Current focus:
 
 Next phase:
 
-- testing
 - PostgreSQL
 - pgvector
 - retrieval pipeline architecture
 - dependency injection cleanup
 - phase-specific timeout tuning
 - metrics endpoint hardening
+- performance/load testing
