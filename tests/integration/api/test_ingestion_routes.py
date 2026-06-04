@@ -12,7 +12,10 @@ from ai_ingestion_retrieval_platform.main import app
 async def test_url_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_preview_url(url: object) -> dict[str, object]:
+    async def fake_preview_url(
+        url: object,
+        _client: httpx.AsyncClient,
+    ) -> dict[str, object]:
         url_str = str(url)
         return {
             "url": url_str,
@@ -25,12 +28,20 @@ async def test_url_preview_route_returns_expected_contract(
 
     monkeypatch.setattr(ingestion_routes, "preview_url", fake_preview_url)
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/ingestion/url/preview",
-            json={"url": "https://example.com"},
-        )
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "https://example.com"},
+            )
+
+    app.state.http_client = None
 
     assert response.status_code == 200
     assert response.json() == {
@@ -53,7 +64,9 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
     async def fake_preview_urls(
         urls: list[object],
         max_concurrency: int,
+        client: httpx.AsyncClient,
     ) -> list[dict[str, object]]:
+        assert isinstance(client, httpx.AsyncClient)
         normalized_urls = [str(url) for url in urls]
         captured["urls"] = normalized_urls
         captured["max_concurrency"] = max_concurrency
@@ -79,9 +92,17 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
         "urls": ["https://example.com"],
     }
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/ingestion/urls/preview", json=payload)
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/ingestion/urls/preview", json=payload)
+
+    app.state.http_client = None
 
     assert response.status_code == 200
     assert len(response.json()) == 1
@@ -91,12 +112,20 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
 
 @pytest.mark.asyncio
 async def test_url_preview_route_rejects_invalid_url() -> None:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/ingestion/url/preview",
-            json={"url": "not-a-url"},
-        )
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "not-a-url"},
+            )
+
+    app.state.http_client = None
 
     assert response.status_code == 422
 
@@ -108,8 +137,16 @@ async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
         "max_concurrency": get_settings().max_allowed_concurrency + 1,
     }
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/ingestion/urls/preview", json=payload)
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/ingestion/urls/preview", json=payload)
+
+    app.state.http_client = None
 
     assert response.status_code == 422

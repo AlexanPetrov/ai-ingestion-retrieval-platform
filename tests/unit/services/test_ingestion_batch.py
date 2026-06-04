@@ -24,7 +24,10 @@ def _make_preview(url: str) -> UrlIngestionPreview:
 async def test_preview_urls_preserves_input_order_and_partial_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_preview_url(url: str) -> UrlIngestionPreview:
+    async def fake_preview_url(
+        url: str,
+        _client: object,
+    ) -> UrlIngestionPreview:
         if "bad" in url:
             raise HTTPException(
                 status_code=400,
@@ -40,7 +43,11 @@ async def test_preview_urls_preserves_input_order_and_partial_failures(
         "https://ok-2.test",
     ]
 
-    results = await ingestion_service.preview_urls(urls=urls, max_concurrency=2)
+    results = await ingestion_service.preview_urls(
+        urls=urls,
+        max_concurrency=2,
+        client=object(),
+    )
 
     assert [result.url for result in results] == urls
     assert [result.success for result in results] == [True, False, True]
@@ -59,7 +66,10 @@ async def test_preview_urls_respects_max_concurrency_bound(
     peak_in_flight = 0
     lock = asyncio.Lock()
 
-    async def fake_preview_url(url: str) -> UrlIngestionPreview:
+    async def fake_preview_url(
+        url: str,
+        _client: object,
+    ) -> UrlIngestionPreview:
         nonlocal in_flight, peak_in_flight
         async with lock:
             in_flight += 1
@@ -75,7 +85,11 @@ async def test_preview_urls_respects_max_concurrency_bound(
     monkeypatch.setattr(ingestion_service, "preview_url", fake_preview_url)
 
     urls = [f"https://example-{index}.test" for index in range(6)]
-    results = await ingestion_service.preview_urls(urls=urls, max_concurrency=2)
+    results = await ingestion_service.preview_urls(
+        urls=urls,
+        max_concurrency=2,
+        client=object(),
+    )
 
     assert len(results) == 6
     assert all(result.success for result in results)

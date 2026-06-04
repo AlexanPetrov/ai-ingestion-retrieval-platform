@@ -10,7 +10,6 @@ from ai_ingestion_retrieval_platform.api.routes.ingestion import (
 )
 from ai_ingestion_retrieval_platform.api.routes.metrics import router as metrics_router
 from ai_ingestion_retrieval_platform.core.config import get_settings
-from ai_ingestion_retrieval_platform.core.http_client import set_http_client
 from ai_ingestion_retrieval_platform.core.logging import configure_logging
 from ai_ingestion_retrieval_platform.middleware.request_logging import (
     RequestLoggingMiddleware,
@@ -34,8 +33,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=client_timeout,
         follow_redirects=False,
     ) as client:
-        set_http_client(client)
+        app.state.http_client = client
         yield
+
+    app.state.http_client = None
 
 
 app = FastAPI(

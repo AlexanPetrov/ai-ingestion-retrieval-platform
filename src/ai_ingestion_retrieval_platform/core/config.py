@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Ingestion & Retrieval Platform"
     log_level: str = "INFO"
+    metrics_enabled: bool = False
+    metrics_token: str | None = None
 
     http_timeout_connect_seconds: float = Field(default=2.0, gt=0)
     http_timeout_read_seconds: float = Field(default=5.0, gt=0)

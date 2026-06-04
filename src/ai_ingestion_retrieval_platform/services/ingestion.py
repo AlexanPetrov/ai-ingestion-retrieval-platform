@@ -13,7 +13,6 @@ from tenacity import (
 )
 
 from ai_ingestion_retrieval_platform.core.config import get_settings
-from ai_ingestion_retrieval_platform.core.http_client import get_http_client
 from ai_ingestion_retrieval_platform.core.limits import outbound_fetch_limiter
 from ai_ingestion_retrieval_platform.core.metrics import (
     INGESTION_BATCH_DURATION_SECONDS,
@@ -153,14 +152,16 @@ async def fetch_url(client: httpx.AsyncClient, url: str) -> httpx.Response:
         )
 
 
-async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
+async def preview_url(
+    url: AnyHttpUrl,
+    client: httpx.AsyncClient,
+) -> UrlIngestionPreview:
     start = perf_counter()
     url_str = str(url)
 
     logger.info("url_preview_started", url=url_str)
 
     try:
-        client = get_http_client()
         response = await fetch_url(client, url_str)
 
     except HTTPException:
@@ -236,6 +237,7 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
 async def preview_urls(
     urls: list[AnyHttpUrl],
     max_concurrency: int,
+    client: httpx.AsyncClient,
 ) -> list[UrlIngestionBatchResult]:
     logger.info(
         "batch_preview_started",
@@ -249,7 +251,7 @@ async def preview_urls(
     async def preview_with_limit(url: AnyHttpUrl) -> UrlIngestionBatchResult:
         async with semaphore:
             try:
-                preview = await preview_url(url)
+                preview = await preview_url(url, client)
 
                 INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
 

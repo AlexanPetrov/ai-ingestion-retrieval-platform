@@ -20,14 +20,14 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 - Response size limits
 - Bounded concurrency
 - Global outbound fetch limiting
-- Shared async HTTP client lifecycle
+- Shared async HTTP client lifecycle via app state
 - Connection pooling
 - Retry/backoff handling
 - Timeout protection
 - Partial batch failure handling
 - Structured JSON logging
 - Request correlation IDs
-- Prometheus metrics
+- Protected Prometheus metrics
 - Failure-path request metrics
 - Typed ingestion errors
 - ASGI request middleware
@@ -35,11 +35,12 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 
 ## Stack
 
+- uv
 - FastAPI
 - httpx
 - asyncio
 - structlog
-- Prometheus client
+- prometheus-client
 - pydantic-settings
 - tenacity
 - Ruff
@@ -65,12 +66,17 @@ PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:app --reload
 src/
 └── ai_ingestion_retrieval_platform/
     ├── api/
+    │   ├── dependencies/
     │   └── routes/
     ├── core/
     ├── middleware/
     ├── schemas/
     ├── services/
     └── main.py
+
+tests/
+├── integration/
+└── unit/
 ```
 
 ## API Docs
@@ -80,6 +86,17 @@ http://127.0.0.1:8000/docs
 ## Metrics
 
 http://127.0.0.1:8000/metrics
+
+The metrics endpoint is disabled by default. To enable it, set:
+
+- `METRICS_ENABLED=true`
+- `METRICS_TOKEN=<your-token>`
+
+Then query it with a bearer token:
+
+```bash
+curl -H "Authorization: Bearer <your-token>" http://127.0.0.1:8000/metrics
+```
 
 ## Development
 
@@ -101,7 +118,7 @@ Current focus:
 - async backend systems
 - concurrency patterns
 - observability
-- backend optimization
+- backend optimization & security
 - production architecture
 
 Next phase:
@@ -109,7 +126,13 @@ Next phase:
 - PostgreSQL
 - pgvector
 - retrieval pipeline architecture
-- dependency injection cleanup
-- phase-specific timeout tuning
-- metrics endpoint hardening
 - performance/load testing
+
+Observability follow-ups:
+
+- metric path normalization when parameterized routes appear
+- dashboards and alerts
+- centralized log aggregation at deploy stage
+- OpenTelemetry once service boundaries increase
+- distributed tracing when workers, DB, Redis, or Kafka are added
+- log sampling when traffic volume is high
