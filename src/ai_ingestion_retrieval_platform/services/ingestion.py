@@ -229,7 +229,7 @@ async def preview_url(url: AnyHttpUrl) -> UrlIngestionPreview:
         content_type=response.headers.get("content-type"),
         content_length=len(response.content),
         elapsed_ms=elapsed_ms,
-        preview=response.text[:500],
+        preview=response.text[: settings.max_preview_text_chars],
     )
 
 

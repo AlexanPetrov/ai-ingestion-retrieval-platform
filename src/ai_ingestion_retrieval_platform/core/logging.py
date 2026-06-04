@@ -3,12 +3,18 @@ import sys
 
 import structlog
 
+from ai_ingestion_retrieval_platform.core.config import get_settings
+
 
 def configure_logging() -> None:
+    settings = get_settings()
+    level_name = settings.log_level.upper()
+    level = getattr(logging, level_name, logging.INFO)
+
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=logging.INFO,
+        level=level,
     )
 
     structlog.configure(

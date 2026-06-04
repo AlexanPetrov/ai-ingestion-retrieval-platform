@@ -23,8 +23,15 @@ settings = get_settings()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
 
+    client_timeout = httpx.Timeout(
+        connect=settings.http_timeout_connect_seconds,
+        read=settings.http_timeout_read_seconds,
+        write=settings.http_timeout_write_seconds,
+        pool=settings.http_timeout_pool_seconds,
+    )
+
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.http_timeout_seconds),
+        timeout=client_timeout,
         follow_redirects=False,
     ) as client:
         set_http_client(client)

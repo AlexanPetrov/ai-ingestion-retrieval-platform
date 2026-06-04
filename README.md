@@ -55,6 +55,7 @@ Production-oriented async ingestion and retrieval platform built with FastAPI an
 git clone https://github.com/apfb11/ai-ingestion-retrieval-platform.git
 cd ai-ingestion-retrieval-platform
 uv sync
+cp .env.example .env
 PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:app --reload
 ```
 

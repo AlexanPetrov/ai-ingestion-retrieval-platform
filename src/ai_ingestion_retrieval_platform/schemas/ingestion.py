@@ -15,7 +15,7 @@ class UrlIngestionRequest(BaseModel):
 class BatchUrlIngestionRequest(BaseModel):
     urls: list[AnyHttpUrl] = Field(
         min_length=1,
-        max_length=20,
+        max_length=settings.max_batch_urls,
         examples=[["https://example.com", "https://httpbin.org/html"]],
         description="Public URLs to fetch for ingestion preview.",
     )
