@@ -18,6 +18,12 @@ INGESTION_URL_PREVIEW_TOTAL = Counter(
     ["result"],
 )
 
+INGESTION_URL_RETRY_TOTAL = Counter(
+    "ingestion_url_retry_total",
+    "Total URL fetch retries scheduled.",
+    ["error_type"],
+)
+
 INGESTION_BATCH_PREVIEW_TOTAL = Counter(
     "ingestion_batch_preview_total",
     "Total batch ingestion preview attempts.",

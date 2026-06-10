@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from time import perf_counter
 
 import httpx
@@ -6,9 +8,11 @@ import structlog
 from fastapi import HTTPException
 from pydantic import AnyHttpUrl
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential_jitter,
 )
 
@@ -18,6 +22,7 @@ from ai_ingestion_retrieval_platform.core.metrics import (
     INGESTION_BATCH_DURATION_SECONDS,
     INGESTION_BATCH_PREVIEW_TOTAL,
     INGESTION_URL_PREVIEW_TOTAL,
+    INGESTION_URL_RETRY_TOTAL,
 )
 from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
@@ -29,7 +34,13 @@ from ai_ingestion_retrieval_platform.schemas.ingestion import (
 logger = structlog.get_logger()
 settings = get_settings()
 
+DEFAULT_RETRY_WAIT = wait_exponential_jitter(
+    initial=settings.retry_backoff_initial_seconds,
+    max=settings.retry_backoff_max_seconds,
+)
+
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRY_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
 
 ERROR_TOO_MANY_REDIRECTS = "Too many redirects"
 ERROR_REDIRECT_MISSING_LOCATION = "Redirect response missing Location header"
@@ -37,8 +48,53 @@ ERROR_TIMEOUT = "URL fetch timed out"
 ERROR_FETCH_FAILED = "URL fetch failed"
 
 
+def is_retry_safe_method(method: str | None) -> bool:
+    if method is None:
+        return False
+
+    return method.upper() in RETRY_SAFE_METHODS
+
+
+def get_exception_request_method(exc: BaseException) -> str | None:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.request.method
+
+    if isinstance(exc, httpx.RequestError):
+        return exc.request.method
+
+    return None
+
+
+def on_retry_before_sleep(retry_state: RetryCallState) -> None:
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+    error_type = type(exception).__name__ if exception else "unknown"
+
+    url = "unknown"
+    if len(retry_state.args) >= 2:
+        url = str(retry_state.args[1])
+
+    sleep_seconds = None
+    if retry_state.next_action is not None:
+        sleep_seconds = round(retry_state.next_action.sleep, 3)
+
+    logger.warning(
+        "url_fetch_retry_scheduled",
+        url=url,
+        error_type=error_type,
+        attempt_number=retry_state.attempt_number,
+        max_attempts=settings.retry_attempts,
+        sleep_seconds=sleep_seconds,
+    )
+
+    INGESTION_URL_RETRY_TOTAL.labels(error_type=error_type).inc()
+
+
 def is_retryable_exception(exc: BaseException) -> bool:
     if isinstance(exc, httpx.ReadTimeout):
+        return False
+
+    request_method = get_exception_request_method(exc)
+    if not is_retry_safe_method(request_method):
         return False
 
     if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, httpx.NetworkError)):
@@ -48,6 +104,50 @@ def is_retryable_exception(exc: BaseException) -> bool:
         return exc.response.status_code in RETRYABLE_STATUS_CODES
 
     return False
+
+
+def get_retry_after_seconds(retry_after_header: str) -> float | None:
+    retry_after_header = retry_after_header.strip()
+
+    if not retry_after_header:
+        return None
+
+    try:
+        retry_after_seconds = float(retry_after_header)
+        return max(0.0, retry_after_seconds)
+    except ValueError:
+        pass
+
+    try:
+        retry_after_datetime = parsedate_to_datetime(retry_after_header)
+    except ValueError:
+        return None
+
+    if retry_after_datetime.tzinfo is None:
+        retry_after_datetime = retry_after_datetime.replace(tzinfo=datetime.UTC)
+
+    now_utc = datetime.now(datetime.UTC)
+    return max(0.0, (retry_after_datetime - now_utc).total_seconds())
+
+
+def get_retry_wait_seconds(retry_state: RetryCallState) -> float:
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+
+    if isinstance(exception, httpx.HTTPStatusError):
+        response = exception.response
+
+        if response.status_code == 429:
+            retry_after_header = response.headers.get("Retry-After")
+            if retry_after_header:
+                retry_after_seconds = get_retry_after_seconds(retry_after_header)
+
+                if retry_after_seconds is not None:
+                    return min(
+                        retry_after_seconds,
+                        settings.retry_backoff_max_seconds,
+                    )
+
+    return DEFAULT_RETRY_WAIT(retry_state)
 
 
 def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
@@ -104,21 +204,24 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
 
 @retry(
     retry=retry_if_exception(is_retryable_exception),
-    stop=stop_after_attempt(settings.retry_attempts),
-    wait=wait_exponential_jitter(
-        initial=settings.retry_backoff_initial_seconds,
-        max=settings.retry_backoff_max_seconds,
-    ),
+    stop=stop_after_attempt(settings.retry_attempts)
+    | stop_after_delay(settings.retry_total_timeout_seconds),
+    wait=get_retry_wait_seconds,
+    before_sleep=on_retry_before_sleep,
     reraise=True,
 )
-async def fetch_url(client: httpx.AsyncClient, url: str) -> httpx.Response:
+async def fetch_url(
+    client: httpx.AsyncClient,
+    url: str,
+    method: str = "GET",
+) -> httpx.Response:
     async with outbound_fetch_limiter:
         current_url = url
 
         for _ in range(settings.max_redirects + 1):
             await validate_url_is_safe(current_url)
 
-            async with client.stream("GET", current_url) as response:
+            async with client.stream(method, current_url) as response:
                 if response.is_redirect:
                     redirect_url = response.headers.get("location")
 

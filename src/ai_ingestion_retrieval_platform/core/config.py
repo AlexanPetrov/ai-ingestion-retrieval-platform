@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     max_batch_urls: int = Field(default=20, ge=1)
 
     retry_attempts: int = Field(default=3, ge=1)
+    retry_total_timeout_seconds: float = Field(default=10.0, gt=0)
     retry_backoff_initial_seconds: float = Field(default=0.5, gt=0)
     retry_backoff_max_seconds: float = Field(default=4.0, gt=0)
 
