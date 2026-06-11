@@ -1,37 +1,28 @@
 # AI Ingestion & Retrieval Platform
 
-Production-oriented async ingestion and retrieval platform built with FastAPI and modern Python backend patterns.
+Production-grade async ingestion and retrieval platform built with FastAPI and modern Python backend patterns.
 
 ## Focus Areas
 
-- Async systems
-- Concurrent ingestion pipelines
-- Resilient external I/O
-- Structured observability
-- Production backend architecture
-- Retrieval infrastructure foundations
+- Async FastAPI backend reliability
+- Safe and resilient external URL ingestion
+- Concurrency control and bounded outbound I/O
+- Production observability and operational security
 
 ## Current Features
 
-- Async URL ingestion
-- SSRF-safe URL validation
-- Private/internal IP blocking
-- Redirect validation
-- Response size limits
-- Bounded concurrency
-- Global outbound fetch limiting
-- Shared async HTTP client lifecycle via app state
-- Connection pooling
-- Retry/backoff handling
-- Timeout protection
-- Partial batch failure handling
-- Structured JSON logging
-- Request correlation IDs
-- Protected Prometheus metrics
-- Failure-path request metrics
-- Typed ingestion errors
-- ASGI request middleware
-- Config-driven runtime settings
+- Async URL preview ingestion pipeline
+- SSRF and DNS safety checks for outbound fetches
+- Redirect validation and response body size capping
+- Bounded concurrency with global outbound limiting
+- Shared async HTTP client via FastAPI lifespan and dependency injection
+- Connection pooling and phase-specific HTTP timeouts
+- Retry and backoff with 429 Retry-After support
+- Partial batch failure handling with typed error mapping
+- Structured JSON logs with request correlation IDs
+- Protected Prometheus metrics endpoint disabled by default
+- ASGI request logging middleware with latency and error metrics
+- Config-driven runtime settings and validated request bounds
 
 ## Stack
 
@@ -75,7 +66,10 @@ src/
     └── main.py
 
 tests/
+├── conftest.py
+├── fixtures/
 ├── integration/
+├── performance/
 └── unit/
 ```
 
@@ -113,20 +107,23 @@ uv run pytest
 
 ## Status
 
+Current implementation scope: ingestability verification and preview output, not full persistence/indexing/retrieval yet.
+
 Current focus:
 
-- async backend systems
-- concurrency patterns
-- observability
-- backend optimization & security
-- production architecture
+- Stage 1 FastAPI reliability hardening (complete)
+- Secure and resilient URL preview ingestion
+- Observability and test baseline
+- Transition to persistence/indexing/retrieval work
 
 Next phase:
 
 - PostgreSQL
 - pgvector
-- retrieval pipeline architecture
-- performance/load testing
+- embeddings integration
+- persistence/indexing/retrieval pipeline
+- retrieval API with relevance and latency evaluation
+- performance/load testing (after retrieval MVP baseline)
 
 Observability follow-ups:
 
