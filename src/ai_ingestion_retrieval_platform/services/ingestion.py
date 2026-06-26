@@ -19,10 +19,15 @@ from tenacity import (
 from ai_ingestion_retrieval_platform.core.config import get_settings
 from ai_ingestion_retrieval_platform.core.limits import outbound_fetch_limiter
 from ai_ingestion_retrieval_platform.core.metrics import (
+    INGESTION_BATCH_IN_FLIGHT,
     INGESTION_BATCH_DURATION_SECONDS,
+    INGESTION_BATCH_LIMITER_WAIT_SECONDS,
     INGESTION_BATCH_PREVIEW_TOTAL,
+    INGESTION_OUTBOUND_IN_FLIGHT,
+    INGESTION_OUTBOUND_LIMITER_WAIT_SECONDS,
     INGESTION_URL_PREVIEW_TOTAL,
     INGESTION_URL_RETRY_TOTAL,
+    INGESTION_URL_TIMEOUT_TOTAL,
 )
 from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
@@ -33,6 +38,8 @@ from ai_ingestion_retrieval_platform.schemas.ingestion import (
 
 logger = structlog.get_logger()
 settings = get_settings()
+host_limiters: dict[str, asyncio.Semaphore] = {}
+host_limiters_lock = asyncio.Lock()
 
 DEFAULT_RETRY_WAIT = wait_exponential_jitter(
     initial=settings.retry_backoff_initial_seconds,
@@ -46,6 +53,22 @@ ERROR_TOO_MANY_REDIRECTS = "Too many redirects"
 ERROR_REDIRECT_MISSING_LOCATION = "Redirect response missing Location header"
 ERROR_TIMEOUT = "URL fetch timed out"
 ERROR_FETCH_FAILED = "URL fetch failed"
+
+
+async def get_host_limiter(hostname: str) -> asyncio.Semaphore:
+    key = hostname.lower()
+
+    async with host_limiters_lock:
+        limiter = host_limiters.get(key)
+        if limiter is None:
+            if len(host_limiters) >= settings.host_limiter_cache_size:
+                oldest_key = next(iter(host_limiters))
+                del host_limiters[oldest_key]
+
+            limiter = asyncio.Semaphore(settings.host_max_concurrency)
+            host_limiters[key] = limiter
+
+        return limiter
 
 
 def is_retry_safe_method(method: str | None) -> bool:
@@ -214,50 +237,85 @@ async def fetch_url(
     client: httpx.AsyncClient,
     url: str,
     method: str = "GET",
+    url_timeout: float | None = None,
 ) -> httpx.Response:
-    async with outbound_fetch_limiter:
-        current_url = url
+    timeout_seconds = url_timeout or settings.url_timeout_seconds
 
-        for _ in range(settings.max_redirects + 1):
-            await validate_url_is_safe(current_url)
+    wait_start = perf_counter()
+    await outbound_fetch_limiter.acquire()
+    INGESTION_OUTBOUND_LIMITER_WAIT_SECONDS.observe(perf_counter() - wait_start)
+    INGESTION_OUTBOUND_IN_FLIGHT.inc()
 
-            async with client.stream(method, current_url) as response:
-                if response.is_redirect:
-                    redirect_url = response.headers.get("location")
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            current_url = httpx.URL(url)
 
-                    if not redirect_url:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=ERROR_REDIRECT_MISSING_LOCATION,
-                        )
+            for _ in range(settings.max_redirects + 1):
+                target = await validate_url_is_safe(str(current_url))
+                host_limiter = await get_host_limiter(target.hostname)
 
-                    current_url = str(response.url.join(redirect_url))
-                    continue
+                pinned_url = current_url.copy_with(host=target.resolved_ip)
 
-                response.raise_for_status()
+                request = client.build_request(
+                    method,
+                    pinned_url,
+                    headers={"Host": target.host_header},
+                    extensions={"sni_hostname": target.hostname},
+                )
 
-                body = bytearray()
+                async with host_limiter:
+                    response = await client.send(request, stream=True)
 
-                async for chunk in response.aiter_bytes():
-                    remaining = settings.max_preview_bytes - len(body)
+                    try:
+                        if response.is_redirect:
+                            redirect_url = response.headers.get("location")
 
-                    if remaining <= 0:
-                        break
+                            if not redirect_url:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=ERROR_REDIRECT_MISSING_LOCATION,
+                                )
 
-                    body.extend(chunk[:remaining])
+                            # Join against the real, hostname-based URL we
+                            # requested -- not response.url, which is the pinned
+                            # IP we actually connected to. Otherwise a relative
+                            # redirect would inherit the IP as its authority
+                            # instead of the real hostname, breaking virtual
+                            # hosting and TLS SNI on the next hop.
+                            current_url = current_url.join(redirect_url)
+                            continue
 
-                response._content = bytes(body)
-                return response
+                        response.raise_for_status()
 
-        raise HTTPException(
-            status_code=400,
-            detail=ERROR_TOO_MANY_REDIRECTS,
-        )
+                        body = bytearray()
+
+                        async for chunk in response.aiter_bytes():
+                            remaining = settings.max_preview_bytes - len(body)
+
+                            if remaining <= 0:
+                                break
+
+                            body.extend(chunk[:remaining])
+
+                        response._content = bytes(body)
+                        return response
+
+                    finally:
+                        await response.aclose()
+
+            raise HTTPException(
+                status_code=400,
+                detail=ERROR_TOO_MANY_REDIRECTS,
+            )
+    finally:
+        INGESTION_OUTBOUND_IN_FLIGHT.dec()
+        outbound_fetch_limiter.release()
 
 
 async def preview_url(
     url: AnyHttpUrl,
     client: httpx.AsyncClient,
+    url_timeout: float | None = None,
 ) -> UrlIngestionPreview:
     start = perf_counter()
     url_str = str(url)
@@ -265,13 +323,30 @@ async def preview_url(
     logger.info("url_preview_started", url=url_str)
 
     try:
-        response = await fetch_url(client, url_str)
+        response = await fetch_url(client, url_str, url_timeout=url_timeout)
 
     except HTTPException:
         raise
 
+    except TimeoutError as exc:
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_TIMEOUT_TOTAL.labels(reason="asyncio_timeout").inc()
+
+        logger.warning(
+            "url_preview_failed",
+            url=url_str,
+            error_type="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+
+        raise HTTPException(
+            status_code=504,
+            detail=ERROR_TIMEOUT,
+        ) from exc
+
     except httpx.TimeoutException as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_TIMEOUT_TOTAL.labels(reason=type(exc).__name__).inc()
 
         logger.warning(
             "url_preview_failed",
@@ -352,9 +427,16 @@ async def preview_urls(
     semaphore = asyncio.Semaphore(max_concurrency)
 
     async def preview_with_limit(url: AnyHttpUrl) -> UrlIngestionBatchResult:
-        async with semaphore:
+        wait_start = perf_counter()
+        await semaphore.acquire()
+        INGESTION_BATCH_LIMITER_WAIT_SECONDS.observe(perf_counter() - wait_start)
+        INGESTION_BATCH_IN_FLIGHT.inc()
+
+        try:
             try:
-                preview = await preview_url(url, client)
+                preview = await preview_url(
+                    url, client, url_timeout=settings.url_timeout_seconds
+                )
 
                 INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
 
@@ -374,6 +456,9 @@ async def preview_urls(
                     data=None,
                     error=build_ingestion_error(exc),
                 )
+        finally:
+            INGESTION_BATCH_IN_FLIGHT.dec()
+            semaphore.release()
 
     results = await asyncio.gather(*(preview_with_limit(url) for url in urls))
 

@@ -1,5 +1,6 @@
 """Unit tests for fetch behavior: redirects, caps, retries, and timeout paths."""
 
+import asyncio
 from types import SimpleNamespace
 
 import httpx
@@ -7,11 +8,21 @@ import pytest
 from fastapi import HTTPException
 from tenacity import stop_after_attempt, wait_none
 
+from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
 
 
-async def _allow_all_urls(_url: str) -> None:
-    return
+async def _allow_all_urls(url: str) -> SafeFetchTarget:
+    parsed = httpx.URL(url)
+    host_header = parsed.host
+    if parsed.port is not None:
+        host_header = f"{host_header}:{parsed.port}"
+
+    return SafeFetchTarget(
+        hostname=parsed.host,
+        resolved_ip="93.184.216.34",
+        host_header=host_header,
+    )
 
 
 @pytest.mark.asyncio
@@ -31,8 +42,7 @@ async def test_fetch_url_redirect_missing_location_returns_controlled_400(
 
     assert exc_info.value.status_code == 400
     assert (
-        str(exc_info.value.detail)
-        == ingestion_service.ERROR_REDIRECT_MISSING_LOCATION
+        str(exc_info.value.detail) == ingestion_service.ERROR_REDIRECT_MISSING_LOCATION
     )
 
 
@@ -367,21 +377,361 @@ def test_fetch_url_retry_stop_policy_includes_total_timeout() -> None:
     assert len(strategy_values) == 2
 
     max_attempt_stop = next(
-        stop
-        for stop in strategy_values
-        if hasattr(stop, "max_attempt_number")
+        stop for stop in strategy_values if hasattr(stop, "max_attempt_number")
     )
     max_delay_stop = next(
-        stop
-        for stop in strategy_values
-        if hasattr(stop, "max_delay")
+        stop for stop in strategy_values if hasattr(stop, "max_delay")
     )
 
     assert (
-        max_attempt_stop.max_attempt_number
-        == ingestion_service.settings.retry_attempts
+        max_attempt_stop.max_attempt_number == ingestion_service.settings.retry_attempts
     )
     assert (
         max_delay_stop.max_delay
         == ingestion_service.settings.retry_total_timeout_seconds
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_uses_pinned_ip_and_hostname_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+
+    seen_request: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_request["url_host"] = request.url.host
+        seen_request["host_header"] = request.headers.get("Host")
+        seen_request["sni_hostname"] = request.extensions.get("sni_hostname")
+        return httpx.Response(status_code=200, content=b"ok", request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await ingestion_service.fetch_url(client, "https://example.com")
+
+    assert response.status_code == 200
+    assert seen_request["url_host"] == "93.184.216.34"
+    assert seen_request["host_header"] == "example.com"
+    assert seen_request["sni_hostname"] == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_resolves_relative_redirect_against_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_urls: list[str] = []
+
+    async def _validate_and_capture(url: str) -> SafeFetchTarget:
+        resolved_urls.append(url)
+        return await _allow_all_urls(url)
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "validate_url_is_safe",
+        _validate_and_capture,
+    )
+
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(
+                status_code=302,
+                headers={"location": "/next-hop"},
+                request=request,
+            )
+
+        return httpx.Response(status_code=200, content=b"ok", request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await ingestion_service.fetch_url(
+            client,
+            "https://example.com/start",
+        )
+
+    assert response.status_code == 200
+    assert resolved_urls == [
+        "https://example.com/start",
+        "https://example.com/next-hop",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preview_url_returns_expected_preview_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service.settings, "max_preview_text_chars", 4)
+
+    async def fake_fetch_url(
+        _client: object,
+        _url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+    ) -> httpx.Response:
+        request = httpx.Request(method, "https://example.com")
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/plain"},
+            content=b"abcdef",
+            request=request,
+        )
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+
+    result = await ingestion_service.preview_url(
+        url="https://example.com",
+        client=object(),
+    )
+
+    assert result.url == "https://example.com"
+    assert result.status_code == 200
+    assert result.content_type == "text/plain"
+    assert result.content_length == 6
+    assert result.preview == "abcd"
+
+
+@pytest.mark.asyncio
+async def test_preview_url_maps_timeout_exception_to_504(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_url(
+        _client: object,
+        _url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+    ) -> httpx.Response:
+        request = httpx.Request(method, "https://example.com")
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ingestion_service.preview_url(
+            url="https://example.com",
+            client=object(),
+        )
+
+    assert exc_info.value.status_code == 504
+    assert str(exc_info.value.detail) == ingestion_service.ERROR_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_preview_url_maps_http_status_error_to_502_with_upstream_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_url(
+        _client: object,
+        _url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+    ) -> httpx.Response:
+        request = httpx.Request(method, "https://example.com")
+        response = httpx.Response(status_code=503, request=request)
+        raise httpx.HTTPStatusError(
+            "upstream returned 503",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ingestion_service.preview_url(
+            url="https://example.com",
+            client=object(),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert str(exc_info.value.detail) == "URL returned HTTP 503"
+
+
+@pytest.mark.asyncio
+async def test_preview_url_maps_network_error_to_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_url(
+        _client: object,
+        _url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+    ) -> httpx.Response:
+        request = httpx.Request(method, "https://example.com")
+        raise httpx.ConnectError("network failed", request=request)
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ingestion_service.preview_url(
+            url="https://example.com",
+            client=object(),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert str(exc_info.value.detail) == ingestion_service.ERROR_FETCH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_preview_url_maps_asyncio_timeout_to_504(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_url(
+        _client: object,
+        _url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+    ) -> httpx.Response:
+        raise TimeoutError("per-URL timeout exceeded")
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ingestion_service.preview_url(
+            url="https://example.com",
+            client=object(),
+        )
+
+    assert exc_info.value.status_code == 504
+    assert str(exc_info.value.detail) == ingestion_service.ERROR_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_limits_same_host_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(ingestion_service.settings, "host_max_concurrency", 2)
+    monkeypatch.setattr(ingestion_service.settings, "host_limiter_cache_size", 1024)
+    ingestion_service.host_limiters.clear()
+
+    in_flight = 0
+    peak_in_flight = 0
+    lock = asyncio.Lock()
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.is_redirect = False
+            self.headers: dict[str, str] = {}
+            self.status_code = 200
+            self._content = b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b"ok"
+
+        async def aclose(self) -> None:
+            return None
+
+    class _FakeClient:
+        def build_request(
+            self,
+            method: str,
+            url: httpx.URL,
+            headers: dict[str, str],
+            extensions: dict[str, str],
+        ) -> httpx.Request:
+            return httpx.Request(method, url, headers=headers, extensions=extensions)
+
+        async def send(self, request: httpx.Request, stream: bool = True) -> _FakeResponse:
+            nonlocal in_flight, peak_in_flight
+            assert stream is True
+
+            async with lock:
+                in_flight += 1
+                peak_in_flight = max(peak_in_flight, in_flight)
+
+            await asyncio.sleep(0.02)
+
+            async with lock:
+                in_flight -= 1
+
+            return _FakeResponse()
+
+    client = _FakeClient()
+
+    urls = [f"https://example.com/item-{i}" for i in range(6)]
+    await asyncio.gather(*(ingestion_service.fetch_url(client, url) for url in urls))
+
+    assert peak_in_flight == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_allows_parallelism_across_different_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(ingestion_service.settings, "host_max_concurrency", 1)
+    monkeypatch.setattr(ingestion_service.settings, "host_limiter_cache_size", 1024)
+    ingestion_service.host_limiters.clear()
+
+    host_in_flight: dict[str, int] = {}
+    host_peak: dict[str, int] = {}
+    total_in_flight = 0
+    total_peak = 0
+    lock = asyncio.Lock()
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.is_redirect = False
+            self.headers: dict[str, str] = {}
+            self.status_code = 200
+            self._content = b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b"ok"
+
+        async def aclose(self) -> None:
+            return None
+
+    class _FakeClient:
+        def build_request(
+            self,
+            method: str,
+            url: httpx.URL,
+            headers: dict[str, str],
+            extensions: dict[str, str],
+        ) -> httpx.Request:
+            return httpx.Request(method, url, headers=headers, extensions=extensions)
+
+        async def send(self, request: httpx.Request, stream: bool = True) -> _FakeResponse:
+            nonlocal total_in_flight, total_peak
+            assert stream is True
+            host = request.headers["Host"].split(":")[0]
+
+            async with lock:
+                host_in_flight[host] = host_in_flight.get(host, 0) + 1
+                host_peak[host] = max(host_peak.get(host, 0), host_in_flight[host])
+                total_in_flight += 1
+                total_peak = max(total_peak, total_in_flight)
+
+            await asyncio.sleep(0.02)
+
+            async with lock:
+                host_in_flight[host] -= 1
+                total_in_flight -= 1
+
+            return _FakeResponse()
+
+    client = _FakeClient()
+
+    urls = [
+        "https://host-a.test/a1",
+        "https://host-b.test/b1",
+        "https://host-a.test/a2",
+        "https://host-b.test/b2",
+    ]
+    await asyncio.gather(*(ingestion_service.fetch_url(client, url) for url in urls))
+
+    assert host_peak.get("host-a.test") == 1
+    assert host_peak.get("host-b.test") == 1
+    assert total_peak == 2

@@ -29,8 +29,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool=settings.http_timeout_pool_seconds,
     )
 
+    client_limits = httpx.Limits(
+        max_connections=settings.http_max_connections,
+        max_keepalive_connections=settings.http_max_keepalive_connections,
+        keepalive_expiry=settings.http_keepalive_expiry_seconds,
+    )
+
     async with httpx.AsyncClient(
         timeout=client_timeout,
+        limits=client_limits,
         follow_redirects=False,
     ) as client:
         app.state.http_client = client

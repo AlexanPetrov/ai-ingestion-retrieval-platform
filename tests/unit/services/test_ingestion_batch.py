@@ -27,6 +27,7 @@ async def test_preview_urls_preserves_input_order_and_partial_failures(
     async def fake_preview_url(
         url: str,
         _client: object,
+        url_timeout: float | None = None,
     ) -> UrlIngestionPreview:
         if "bad" in url:
             raise HTTPException(
@@ -69,6 +70,7 @@ async def test_preview_urls_respects_max_concurrency_bound(
     async def fake_preview_url(
         url: str,
         _client: object,
+        url_timeout: float | None = None,
     ) -> UrlIngestionPreview:
         nonlocal in_flight, peak_in_flight
         async with lock:

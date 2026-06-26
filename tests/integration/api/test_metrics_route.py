@@ -100,5 +100,10 @@ async def test_metrics_route_exposes_project_metric_families(
     assert "http_requests_total" in payload
     assert "http_request_duration_seconds" in payload
     assert "ingestion_url_preview_total" in payload
+    assert "ingestion_url_timeout_total" in payload
     assert "ingestion_batch_preview_total" in payload
     assert "ingestion_batch_duration_seconds" in payload
+    assert "ingestion_outbound_limiter_wait_seconds" in payload
+    assert "ingestion_batch_limiter_wait_seconds" in payload
+    assert "ingestion_outbound_in_flight" in payload
+    assert "ingestion_batch_in_flight" in payload

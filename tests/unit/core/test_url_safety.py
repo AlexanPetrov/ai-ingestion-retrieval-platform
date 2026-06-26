@@ -16,8 +16,23 @@ from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
         "https://example.com",
     ],
 )
-async def test_validate_url_is_safe_allows_public_http_https(url: str) -> None:
-    await validate_url_is_safe(url)
+async def test_validate_url_is_safe_allows_public_http_https(
+    url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+
+    def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
+        return fake_addresses
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    result = await validate_url_is_safe(url)
+    assert result.hostname == "example.com"
+    assert result.resolved_ip == "93.184.216.34"
+    assert result.host_header == "example.com"
 
 
 @pytest.mark.asyncio
@@ -95,4 +110,24 @@ async def test_validate_url_is_safe_allows_hostname_resolving_to_public_ip(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    await validate_url_is_safe("https://public-domain.test")
+    result = await validate_url_is_safe("https://public-domain.test")
+    assert result.hostname == "public-domain.test"
+    assert result.resolved_ip == "93.184.216.34"
+    assert result.host_header == "public-domain.test"
+
+
+@pytest.mark.asyncio
+async def test_validate_url_is_safe_includes_non_default_port_in_host_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443)),
+    ]
+
+    def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
+        return fake_addresses
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    result = await validate_url_is_safe("https://public-domain.test:8443/path")
+    assert result.host_header == "public-domain.test:8443"

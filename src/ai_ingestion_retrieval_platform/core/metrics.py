@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 HTTP_REQUESTS_TOTAL = Counter(
     "http_requests_total",
@@ -24,6 +24,12 @@ INGESTION_URL_RETRY_TOTAL = Counter(
     ["error_type"],
 )
 
+INGESTION_URL_TIMEOUT_TOTAL = Counter(
+    "ingestion_url_timeout_total",
+    "Total URL preview timeout failures by timeout type.",
+    ["reason"],
+)
+
 INGESTION_BATCH_PREVIEW_TOTAL = Counter(
     "ingestion_batch_preview_total",
     "Total batch ingestion preview attempts.",
@@ -33,4 +39,24 @@ INGESTION_BATCH_PREVIEW_TOTAL = Counter(
 INGESTION_BATCH_DURATION_SECONDS = Histogram(
     "ingestion_batch_duration_seconds",
     "Batch ingestion preview latency in seconds.",
+)
+
+INGESTION_OUTBOUND_LIMITER_WAIT_SECONDS = Histogram(
+    "ingestion_outbound_limiter_wait_seconds",
+    "Wait time in seconds to acquire global outbound limiter.",
+)
+
+INGESTION_BATCH_LIMITER_WAIT_SECONDS = Histogram(
+    "ingestion_batch_limiter_wait_seconds",
+    "Wait time in seconds to acquire per-batch limiter.",
+)
+
+INGESTION_OUTBOUND_IN_FLIGHT = Gauge(
+    "ingestion_outbound_in_flight",
+    "Current number of active outbound fetch operations.",
+)
+
+INGESTION_BATCH_IN_FLIGHT = Gauge(
+    "ingestion_batch_in_flight",
+    "Current number of active URL preview operations inside a batch.",
 )
