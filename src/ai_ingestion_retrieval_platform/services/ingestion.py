@@ -19,8 +19,8 @@ from tenacity import (
 from ai_ingestion_retrieval_platform.core.config import get_settings
 from ai_ingestion_retrieval_platform.core.limits import outbound_fetch_limiter
 from ai_ingestion_retrieval_platform.core.metrics import (
-    INGESTION_BATCH_IN_FLIGHT,
     INGESTION_BATCH_DURATION_SECONDS,
+    INGESTION_BATCH_IN_FLIGHT,
     INGESTION_BATCH_LIMITER_WAIT_SECONDS,
     INGESTION_BATCH_PREVIEW_TOTAL,
     INGESTION_OUTBOUND_IN_FLIGHT,

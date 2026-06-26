@@ -639,7 +639,9 @@ async def test_fetch_url_limits_same_host_concurrency(
         ) -> httpx.Request:
             return httpx.Request(method, url, headers=headers, extensions=extensions)
 
-        async def send(self, request: httpx.Request, stream: bool = True) -> _FakeResponse:
+        async def send(
+            self, request: httpx.Request, stream: bool = True
+        ) -> _FakeResponse:
             nonlocal in_flight, peak_in_flight
             assert stream is True
 
@@ -703,7 +705,9 @@ async def test_fetch_url_allows_parallelism_across_different_hosts(
         ) -> httpx.Request:
             return httpx.Request(method, url, headers=headers, extensions=extensions)
 
-        async def send(self, request: httpx.Request, stream: bool = True) -> _FakeResponse:
+        async def send(
+            self, request: httpx.Request, stream: bool = True
+        ) -> _FakeResponse:
             nonlocal total_in_flight, total_peak
             assert stream is True
             host = request.headers["Host"].split(":")[0]
