@@ -14,11 +14,12 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Async URL preview ingestion pipeline
 - SSRF and DNS safety checks for outbound fetches
 - Redirect validation and response body size capping
-- Bounded concurrency with global outbound limiting
+- Bounded concurrency with global and per-host outbound limiting
 - Shared async HTTP client via FastAPI lifespan and dependency injection
-- Connection pooling and phase-specific HTTP timeouts
+- Connection pooling, phase-specific HTTP timeouts, and per-URL timeout enforcement
 - Retry and backoff with 429 Retry-After support
 - Partial batch failure handling with typed error mapping
+- Saturation metrics: limiter wait times, in-flight tracking, timeout instrumentation
 - Structured JSON logs with request correlation IDs
 - Protected Prometheus metrics endpoint disabled by default
 - ASGI request logging middleware with latency and error metrics
