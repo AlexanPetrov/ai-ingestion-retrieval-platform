@@ -117,9 +117,9 @@ Current implementation scope: ingestion verification and preview output, not ful
 Current focus:
 
 - Stage 1 FastAPI reliability hardening (complete)
-- Secure and resilient URL preview ingestion
-- Observability and test baseline
-- Transition to persistence/indexing/retrieval work
+- Secure and resilient URL preview ingestion (complete for preview scope)
+- Observability and test baseline (complete for current scope)
+- Transition to persistence/indexing/retrieval work (next)
 
 Next phase:
 
