@@ -51,6 +51,11 @@ INGESTION_BATCH_LIMITER_WAIT_SECONDS = Histogram(
     "Wait time in seconds to acquire per-batch limiter.",
 )
 
+INGESTION_HOST_LIMITER_WAIT_SECONDS = Histogram(
+    "ingestion_host_limiter_wait_seconds",
+    "Wait time in seconds to acquire per-host limiter.",
+)
+
 INGESTION_OUTBOUND_IN_FLIGHT = Gauge(
     "ingestion_outbound_in_flight",
     "Current number of active outbound fetch operations.",

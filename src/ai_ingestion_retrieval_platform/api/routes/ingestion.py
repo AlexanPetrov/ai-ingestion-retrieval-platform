@@ -1,3 +1,5 @@
+"""Ingestion API routes for URL preview requests."""
+
 from typing import Annotated
 
 import httpx

@@ -5,6 +5,7 @@ import socket
 import pytest
 from fastapi import HTTPException
 
+from ai_ingestion_retrieval_platform.core.config import get_settings
 from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 
 
@@ -58,6 +59,24 @@ async def test_validate_url_is_safe_rejects_invalid_or_internal_targets(
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == expected_detail
+
+
+@pytest.mark.asyncio
+async def test_validate_url_is_safe_rejects_url_credentials() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await validate_url_is_safe("https://user:pass@example.com")
+
+    assert exc_info.value.status_code == 400
+    assert str(exc_info.value.detail) == "URL credentials are not allowed"
+
+
+@pytest.mark.asyncio
+async def test_validate_url_is_safe_rejects_non_allowed_port() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await validate_url_is_safe("https://public-domain.test:8443/path")
+
+    assert exc_info.value.status_code == 400
+    assert str(exc_info.value.detail) == "URL port is not allowed"
 
 
 @pytest.mark.asyncio
@@ -117,7 +136,7 @@ async def test_validate_url_is_safe_allows_hostname_resolving_to_public_ip(
 
 
 @pytest.mark.asyncio
-async def test_validate_url_is_safe_includes_non_default_port_in_host_header(
+async def test_validate_url_is_safe_allows_configured_non_default_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_addresses = [
@@ -128,6 +147,10 @@ async def test_validate_url_is_safe_includes_non_default_port_in_host_header(
         return fake_addresses
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(get_settings(), "allowed_fetch_ports", (80, 443, 8443))
 
     result = await validate_url_is_safe("https://public-domain.test:8443/path")
+
+    assert result.hostname == "public-domain.test"
+    assert result.resolved_ip == "93.184.216.34"
     assert result.host_header == "public-domain.test:8443"

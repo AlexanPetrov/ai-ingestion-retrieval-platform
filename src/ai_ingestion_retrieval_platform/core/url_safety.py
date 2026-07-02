@@ -1,3 +1,5 @@
+"""SSRF and DNS safety checks for outbound URL fetching."""
+
 import asyncio
 import ipaddress
 import socket
@@ -5,6 +7,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
+
+from ai_ingestion_retrieval_platform.core.config import get_settings
 
 BLOCKED_HOSTNAMES = {"localhost"}
 BLOCKED_IPS = {
@@ -16,47 +20,73 @@ DEFAULT_PORTS = {"http": 80, "https": 443}
 
 @dataclass(frozen=True)
 class SafeFetchTarget:
-    """Result of a validated SSRF safety check.
-
-    Carries the exact IP that was validated, plus the headers/SNI value
-    needed to connect directly to that IP while still presenting the
-    original hostname. This lets the caller pin the connection to the
-    validated IP instead of letting httpx re-resolve the hostname later,
-    which would reopen a DNS-rebinding gap between "the IP we checked" and
-    "the IP we actually connect to", and would duplicate a blocking DNS
-    lookup on the same shared thread pool.
-    """
+    """Result of a validated SSRF safety check."""
 
     hostname: str
     resolved_ip: str
     host_header: str
 
 
+def _normalize_ip(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+
+    return ip
+
+
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    normalized_ip = _normalize_ip(ip)
+
     return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-        or ip in BLOCKED_IPS
+        normalized_ip.is_private
+        or normalized_ip.is_loopback
+        or normalized_ip.is_link_local
+        or normalized_ip.is_multicast
+        or normalized_ip.is_reserved
+        or normalized_ip.is_unspecified
+        or normalized_ip in BLOCKED_IPS
     )
 
 
 def _build_host_header(hostname: str, scheme: str, port: int) -> str:
     if port == DEFAULT_PORTS.get(scheme):
         return hostname
+
     return f"{hostname}:{port}"
 
 
+def _get_validated_port(
+    scheme: str,
+    port: int | None,
+    allowed_ports: tuple[int, ...],
+) -> int:
+    resolved_port = port or DEFAULT_PORTS[scheme]
+
+    if resolved_port not in allowed_ports:
+        raise HTTPException(
+            status_code=400,
+            detail="URL port is not allowed",
+        )
+
+    return resolved_port
+
+
 async def validate_url_is_safe(url: str) -> SafeFetchTarget:
+    settings = get_settings()
     parsed = urlparse(url)
 
     if parsed.scheme not in {"http", "https"}:
         raise HTTPException(
             status_code=400,
             detail="Only http and https URLs are allowed",
+        )
+
+    if parsed.username or parsed.password:
+        raise HTTPException(
+            status_code=400,
+            detail="URL credentials are not allowed",
         )
 
     if not parsed.hostname:
@@ -73,7 +103,18 @@ async def validate_url_is_safe(url: str) -> SafeFetchTarget:
             detail="Localhost URLs are not allowed",
         )
 
-    port = parsed.port or DEFAULT_PORTS[parsed.scheme]
+    try:
+        port = _get_validated_port(
+            parsed.scheme,
+            parsed.port,
+            settings.allowed_fetch_ports,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="URL port is invalid",
+        ) from exc
+
     host_header = _build_host_header(hostname, parsed.scheme, port)
 
     try:
@@ -82,7 +123,9 @@ async def validate_url_is_safe(url: str) -> SafeFetchTarget:
         literal_ip = None
 
     if literal_ip is not None:
-        if _is_blocked_ip(literal_ip):
+        normalized_literal_ip = _normalize_ip(literal_ip)
+
+        if _is_blocked_ip(normalized_literal_ip):
             raise HTTPException(
                 status_code=400,
                 detail="Private/internal IP URLs are not allowed",
@@ -90,7 +133,7 @@ async def validate_url_is_safe(url: str) -> SafeFetchTarget:
 
         return SafeFetchTarget(
             hostname=hostname,
-            resolved_ip=str(literal_ip),
+            resolved_ip=str(normalized_literal_ip),
             host_header=host_header,
         )
 
@@ -112,7 +155,9 @@ async def validate_url_is_safe(url: str) -> SafeFetchTarget:
             detail="URL hostname could not be resolved",
         )
 
-    resolved_ips = [ipaddress.ip_address(address[4][0]) for address in addresses]
+    resolved_ips = {
+        _normalize_ip(ipaddress.ip_address(address[4][0])) for address in addresses
+    }
 
     for ip in resolved_ips:
         if _is_blocked_ip(ip):
@@ -121,10 +166,7 @@ async def validate_url_is_safe(url: str) -> SafeFetchTarget:
                 detail="URL resolves to a private/internal IP",
             )
 
-    # Every address above was validated, so pinning to the first one is
-    # safe -- it's the exact result the check above vouched for, not a
-    # fresh lookup that could return something different.
-    pinned_ip = resolved_ips[0]
+    pinned_ip = next(iter(resolved_ips))
 
     return SafeFetchTarget(
         hostname=hostname,

@@ -1,3 +1,5 @@
+"""Environment-backed runtime settings and safety limits."""
+
 from functools import lru_cache
 
 from pydantic import Field
@@ -16,19 +18,35 @@ class Settings(BaseSettings):
     metrics_enabled: bool = False
     metrics_token: str | None = None
 
-    http_timeout_connect_seconds: float = Field(default=2.0, gt=0)
-    http_timeout_read_seconds: float = Field(default=5.0, gt=0)
-    http_timeout_write_seconds: float = Field(default=5.0, gt=0)
-    http_timeout_pool_seconds: float = Field(default=2.0, gt=0)
-    http_max_connections: int = Field(default=20, ge=1)
-    http_max_keepalive_connections: int = Field(default=10, ge=1)
-    http_keepalive_expiry_seconds: float = Field(default=30.0, gt=0)
+    http_timeout_connect_seconds: float = Field(
+        default=2.0, gt=0
+    )  # Max time to open connection.
+    http_timeout_read_seconds: float = Field(
+        default=5.0, gt=0
+    )  # Max wait between response chunks.
+    http_timeout_write_seconds: float = Field(
+        default=5.0, gt=0
+    )  # Max time to send request data.
+    http_timeout_pool_seconds: float = Field(
+        default=2.0, gt=0
+    )  # Max wait for free pooled connection.
+    http_max_connections: int = Field(
+        default=20, ge=1
+    )  # Max total outbound HTTP connections.
+    http_max_keepalive_connections: int = Field(
+        default=10, ge=1
+    )  # Max idle reusable connections.
+    http_keepalive_expiry_seconds: float = Field(
+        default=30.0, gt=0
+    )  # How long idle connections stay open.
+
     max_redirects: int = Field(default=5, ge=0)
     max_preview_bytes: int = Field(default=65_536, ge=1)
     max_preview_text_chars: int = Field(default=500, ge=1)
     max_batch_urls: int = Field(default=20, ge=1)
+    allowed_fetch_ports: tuple[int, ...] = (80, 443)
 
-    retry_attempts: int = Field(default=2, ge=1)
+    retry_attempts: int = Field(default=3, ge=1)
     retry_total_timeout_seconds: float = Field(default=10.0, gt=0)
     retry_backoff_initial_seconds: float = Field(default=0.5, gt=0)
     retry_backoff_max_seconds: float = Field(default=4.0, gt=0)

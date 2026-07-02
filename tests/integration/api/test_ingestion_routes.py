@@ -5,13 +5,15 @@ import pytest
 
 from ai_ingestion_retrieval_platform.api.routes import ingestion as ingestion_routes
 from ai_ingestion_retrieval_platform.core.config import get_settings
-from ai_ingestion_retrieval_platform.main import app
+from ai_ingestion_retrieval_platform.main import create_app
 
 
 @pytest.mark.asyncio
 async def test_url_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    app = create_app()
+
     async def fake_preview_url(
         url: object,
         _client: httpx.AsyncClient,
@@ -59,6 +61,7 @@ async def test_url_preview_route_returns_expected_contract(
 async def test_urls_preview_route_forwards_urls_and_default_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    app = create_app()
     captured: dict[str, object] = {}
 
     async def fake_preview_urls(
@@ -112,6 +115,8 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
 
 @pytest.mark.asyncio
 async def test_url_preview_route_rejects_invalid_url() -> None:
+    app = create_app()
+
     async with httpx.AsyncClient() as shared_client:
         app.state.http_client = shared_client
 
@@ -132,6 +137,8 @@ async def test_url_preview_route_rejects_invalid_url() -> None:
 
 @pytest.mark.asyncio
 async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
+    app = create_app()
+
     payload = {
         "urls": ["https://example.com"],
         "max_concurrency": get_settings().max_allowed_concurrency + 1,

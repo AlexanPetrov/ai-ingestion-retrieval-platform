@@ -27,6 +27,15 @@ def test_get_http_client_raises_when_not_initialized() -> None:
         get_http_client(request)
 
 
+def test_get_http_client_raises_when_state_value_has_wrong_type() -> None:
+    app = FastAPI()
+    app.state.http_client = object()
+    request = _build_request(app)
+
+    with pytest.raises(RuntimeError, match="HTTP client has not been initialized"):
+        get_http_client(request)
+
+
 @pytest.mark.asyncio
 async def test_get_http_client_returns_initialized_client() -> None:
     app = FastAPI()

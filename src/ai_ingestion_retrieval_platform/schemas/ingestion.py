@@ -1,3 +1,5 @@
+"""Pydantic request and response schemas for ingestion APIs."""
+
 from pydantic import AnyHttpUrl, BaseModel, Field
 
 from ai_ingestion_retrieval_platform.core.config import get_settings
@@ -5,6 +7,9 @@ from ai_ingestion_retrieval_platform.core.config import get_settings
 settings = get_settings()
 
 
+# Config-backed schema constraints are evaluated at import time.
+# If tests or deployments need per-app dynamic limits, move these checks
+# into route/dependency validation using request.app.state.settings.
 class UrlIngestionRequest(BaseModel):
     url: AnyHttpUrl = Field(
         examples=["https://example.com"],

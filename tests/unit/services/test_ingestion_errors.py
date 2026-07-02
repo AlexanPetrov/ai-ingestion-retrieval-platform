@@ -15,6 +15,10 @@ from ai_ingestion_retrieval_platform.services import ingestion as ingestion_serv
             ingestion_service.ERROR_REDIRECT_MISSING_LOCATION,
             "redirect_error",
         ),
+        (400, "Only http and https URLs are allowed", "unsupported_url_scheme"),
+        (400, "URL credentials are not allowed", "url_credentials_not_allowed"),
+        (400, "URL port is not allowed", "url_port_not_allowed"),
+        (400, "URL port is invalid", "url_port_invalid"),
         (400, "Private/internal IP URLs are not allowed", "unsafe_url"),
         (504, ingestion_service.ERROR_TIMEOUT, "timeout"),
         (502, "URL returned HTTP 503", "http_status"),
@@ -34,3 +38,4 @@ def test_build_ingestion_error_maps_to_expected_error_code(
     assert result.code == expected_code
     assert result.message == detail
     assert result.status_code == status_code
+    

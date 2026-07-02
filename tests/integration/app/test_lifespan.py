@@ -3,14 +3,16 @@
 import httpx
 import pytest
 
-from ai_ingestion_retrieval_platform.main import app, lifespan
+from ai_ingestion_retrieval_platform.main import create_app
 
 
 @pytest.mark.asyncio
 async def test_lifespan_initializes_and_closes_shared_http_client() -> None:
+    app = create_app()
+
     assert getattr(app.state, "http_client", None) is None
 
-    async with lifespan(app):
+    async with app.router.lifespan_context(app):
         client = app.state.http_client
         assert isinstance(client, httpx.AsyncClient)
         assert client.is_closed is False
@@ -21,10 +23,16 @@ async def test_lifespan_initializes_and_closes_shared_http_client() -> None:
 
 @pytest.mark.asyncio
 async def test_app_health_route_works_with_lifespan_enabled() -> None:
-    transport = httpx.ASGITransport(app=app)
+    app = create_app()
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}

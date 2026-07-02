@@ -1,3 +1,5 @@
+"""ASGI middleware for request logs, request IDs, and HTTP metrics."""
+
 from time import perf_counter
 from uuid import uuid4
 
@@ -22,7 +24,7 @@ class RequestLoggingMiddleware:
             return
 
         method = scope["method"]
-        path = scope["path"]
+        raw_path = scope["path"]
         request_id = self._get_request_id(scope)
         start = perf_counter()
         status_code = 500
@@ -33,7 +35,7 @@ class RequestLoggingMiddleware:
         logger.info(
             "request_started",
             method=method,
-            path=path,
+            path=raw_path,
         )
 
         async def send_wrapper(message: Message) -> None:
@@ -53,22 +55,24 @@ class RequestLoggingMiddleware:
         except Exception:
             elapsed_seconds = perf_counter() - start
             elapsed_ms = round(elapsed_seconds * 1000, 2)
+            metric_path = self._get_metric_path(scope, raw_path)
 
             HTTP_REQUESTS_TOTAL.labels(
                 method=method,
-                path=path,
+                path=metric_path,
                 status_code="500",
             ).inc()
 
             HTTP_REQUEST_DURATION_SECONDS.labels(
                 method=method,
-                path=path,
+                path=metric_path,
             ).observe(elapsed_seconds)
 
             logger.exception(
                 "request_failed",
                 method=method,
-                path=path,
+                path=metric_path,
+                raw_path=raw_path,
                 status_code=500,
                 elapsed_ms=elapsed_ms,
             )
@@ -76,22 +80,24 @@ class RequestLoggingMiddleware:
 
         elapsed_seconds = perf_counter() - start
         elapsed_ms = round(elapsed_seconds * 1000, 2)
+        metric_path = self._get_metric_path(scope, raw_path)
 
         HTTP_REQUESTS_TOTAL.labels(
             method=method,
-            path=path,
+            path=metric_path,
             status_code=str(status_code),
         ).inc()
 
         HTTP_REQUEST_DURATION_SECONDS.labels(
             method=method,
-            path=path,
+            path=metric_path,
         ).observe(elapsed_seconds)
 
         logger.info(
             "request_completed",
             method=method,
-            path=path,
+            path=metric_path,
+            raw_path=raw_path,
             status_code=status_code,
             elapsed_ms=elapsed_ms,
         )
@@ -104,3 +110,12 @@ class RequestLoggingMiddleware:
             return request_id.decode()
 
         return str(uuid4())
+
+    def _get_metric_path(self, scope: Scope, fallback_path: str) -> str:
+        route = scope.get("route")
+        route_path = getattr(route, "path", None)
+
+        if isinstance(route_path, str):
+            return route_path
+
+        return fallback_path

@@ -1,3 +1,5 @@
+"""URL ingestion service with safety checks, retries, and bounded concurrency."""
+
 import asyncio
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -17,12 +19,17 @@ from tenacity import (
 )
 
 from ai_ingestion_retrieval_platform.core.config import get_settings
-from ai_ingestion_retrieval_platform.core.limits import outbound_fetch_limiter
+from ai_ingestion_retrieval_platform.core.limits import (
+    create_batch_limiter,
+    get_host_limiter,
+    get_outbound_fetch_limiter,
+)
 from ai_ingestion_retrieval_platform.core.metrics import (
     INGESTION_BATCH_DURATION_SECONDS,
     INGESTION_BATCH_IN_FLIGHT,
     INGESTION_BATCH_LIMITER_WAIT_SECONDS,
     INGESTION_BATCH_PREVIEW_TOTAL,
+    INGESTION_HOST_LIMITER_WAIT_SECONDS,
     INGESTION_OUTBOUND_IN_FLIGHT,
     INGESTION_OUTBOUND_LIMITER_WAIT_SECONDS,
     INGESTION_URL_PREVIEW_TOTAL,
@@ -38,8 +45,6 @@ from ai_ingestion_retrieval_platform.schemas.ingestion import (
 
 logger = structlog.get_logger()
 settings = get_settings()
-host_limiters: dict[str, asyncio.Semaphore] = {}
-host_limiters_lock = asyncio.Lock()
 
 DEFAULT_RETRY_WAIT = wait_exponential_jitter(
     initial=settings.retry_backoff_initial_seconds,
@@ -53,22 +58,6 @@ ERROR_TOO_MANY_REDIRECTS = "Too many redirects"
 ERROR_REDIRECT_MISSING_LOCATION = "Redirect response missing Location header"
 ERROR_TIMEOUT = "URL fetch timed out"
 ERROR_FETCH_FAILED = "URL fetch failed"
-
-
-async def get_host_limiter(hostname: str) -> asyncio.Semaphore:
-    key = hostname.lower()
-
-    async with host_limiters_lock:
-        limiter = host_limiters.get(key)
-        if limiter is None:
-            if len(host_limiters) >= settings.host_limiter_cache_size:
-                oldest_key = next(iter(host_limiters))
-                del host_limiters[oldest_key]
-
-            limiter = asyncio.Semaphore(settings.host_max_concurrency)
-            host_limiters[key] = limiter
-
-        return limiter
 
 
 def is_retry_safe_method(method: str | None) -> bool:
@@ -159,7 +148,7 @@ def get_retry_wait_seconds(retry_state: RetryCallState) -> float:
     if isinstance(exception, httpx.HTTPStatusError):
         response = exception.response
 
-        if response.status_code == 429:
+        if response.status_code in {429, 503}:
             retry_after_header = response.headers.get("Retry-After")
             if retry_after_header:
                 retry_after_seconds = get_retry_after_seconds(retry_after_header)
@@ -186,6 +175,34 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
     if detail == ERROR_REDIRECT_MISSING_LOCATION:
         return UrlIngestionError(
             code="redirect_error",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if detail == "Only http and https URLs are allowed":
+        return UrlIngestionError(
+            code="unsupported_url_scheme",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if detail == "URL credentials are not allowed":
+        return UrlIngestionError(
+            code="url_credentials_not_allowed",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if detail == "URL port is not allowed":
+        return UrlIngestionError(
+            code="url_port_not_allowed",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if detail == "URL port is invalid":
+        return UrlIngestionError(
+            code="url_port_invalid",
             message=detail,
             status_code=exc.status_code,
         )
@@ -223,8 +240,6 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
         message=detail,
         status_code=exc.status_code,
     )
-
-
 @retry(
     retry=retry_if_exception(is_retryable_exception),
     stop=stop_after_attempt(settings.retry_attempts)
@@ -239,7 +254,10 @@ async def fetch_url(
     method: str = "GET",
     url_timeout: float | None = None,
 ) -> httpx.Response:
-    timeout_seconds = url_timeout or settings.url_timeout_seconds
+    timeout_seconds = (
+        settings.url_timeout_seconds if url_timeout is None else url_timeout
+    )
+    outbound_fetch_limiter = get_outbound_fetch_limiter(settings)
 
     wait_start = perf_counter()
     await outbound_fetch_limiter.acquire()
@@ -252,7 +270,7 @@ async def fetch_url(
 
             for _ in range(settings.max_redirects + 1):
                 target = await validate_url_is_safe(str(current_url))
-                host_limiter = await get_host_limiter(target.hostname)
+                host_limiter = await get_host_limiter(target.hostname, settings)
 
                 pinned_url = current_url.copy_with(host=target.resolved_ip)
 
@@ -263,7 +281,13 @@ async def fetch_url(
                     extensions={"sni_hostname": target.hostname},
                 )
 
-                async with host_limiter:
+                host_wait_start = perf_counter()
+                await host_limiter.acquire()
+                INGESTION_HOST_LIMITER_WAIT_SECONDS.observe(
+                    perf_counter() - host_wait_start
+                )
+
+                try:
                     response = await client.send(request, stream=True)
 
                     try:
@@ -276,12 +300,8 @@ async def fetch_url(
                                     detail=ERROR_REDIRECT_MISSING_LOCATION,
                                 )
 
-                            # Join against the real, hostname-based URL we
-                            # requested -- not response.url, which is the pinned
-                            # IP we actually connected to. Otherwise a relative
-                            # redirect would inherit the IP as its authority
-                            # instead of the real hostname, breaking virtual
-                            # hosting and TLS SNI on the next hop.
+                            # Resolve relative redirects against the hostname URL.
+                            # This preserves Host/SNI and keeps safety checks correct.
                             current_url = current_url.join(redirect_url)
                             continue
 
@@ -302,6 +322,9 @@ async def fetch_url(
 
                     finally:
                         await response.aclose()
+
+                finally:
+                    host_limiter.release()
 
             raise HTTPException(
                 status_code=400,
@@ -424,18 +447,20 @@ async def preview_urls(
     )
 
     start = perf_counter()
-    semaphore = asyncio.Semaphore(max_concurrency)
+    batch_limiter = create_batch_limiter(max_concurrency)
 
     async def preview_with_limit(url: AnyHttpUrl) -> UrlIngestionBatchResult:
         wait_start = perf_counter()
-        await semaphore.acquire()
+        await batch_limiter.acquire()
         INGESTION_BATCH_LIMITER_WAIT_SECONDS.observe(perf_counter() - wait_start)
         INGESTION_BATCH_IN_FLIGHT.inc()
 
         try:
             try:
                 preview = await preview_url(
-                    url, client, url_timeout=settings.url_timeout_seconds
+                    url,
+                    client,
+                    url_timeout=settings.url_timeout_seconds,
                 )
 
                 INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
@@ -458,7 +483,7 @@ async def preview_urls(
                 )
         finally:
             INGESTION_BATCH_IN_FLIGHT.dec()
-            semaphore.release()
+            batch_limiter.release()
 
     results = await asyncio.gather(*(preview_with_limit(url) for url in urls))
 

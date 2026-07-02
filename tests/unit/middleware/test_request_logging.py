@@ -135,6 +135,53 @@ async def test_middleware_generates_request_id_when_missing(
 
 
 @pytest.mark.asyncio
+async def test_middleware_uses_normalized_route_path_for_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_counter = _FakeCounter()
+    fake_histogram = _FakeHistogram()
+
+    monkeypatch.setattr(middleware_module, "HTTP_REQUESTS_TOTAL", fake_counter)
+    monkeypatch.setattr(
+        middleware_module,
+        "HTTP_REQUEST_DURATION_SECONDS",
+        fake_histogram,
+    )
+
+    async def app(scope: dict[str, object], _receive: object, send: object) -> None:
+        scope["route"] = type("Route", (), {"path": "/documents/{document_id}"})()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    middleware = middleware_module.RequestLoggingMiddleware(app)
+
+    async def send(_message: dict[str, object]) -> None:
+        return
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/documents/123",
+        "headers": [],
+    }
+
+    await middleware(scope, _receive, send)
+
+    assert fake_counter.inc_calls == [
+        {
+            "method": "GET",
+            "path": "/documents/{document_id}",
+            "status_code": "200",
+        }
+    ]
+    assert fake_histogram.observe_calls
+    assert fake_histogram.observe_calls[0][0] == {
+        "method": "GET",
+        "path": "/documents/{document_id}",
+    }
+
+
+@pytest.mark.asyncio
 async def test_middleware_records_500_metrics_on_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

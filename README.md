@@ -24,6 +24,10 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Protected Prometheus metrics endpoint disabled by default
 - ASGI request logging middleware with latency and error metrics
 - Config-driven runtime settings and validated request bounds
+- Allowed outbound fetch ports to reduce SSRF/network probing risk
+- URL credential rejection for safer outbound ingestion
+- Normalized request metric paths to avoid high-cardinality Prometheus labels
+- Per-host limiter wait metrics for outbound saturation visibility
 
 ## Stack
 
@@ -49,7 +53,7 @@ git clone https://github.com/apfb11/ai-ingestion-retrieval-platform.git
 cd ai-ingestion-retrieval-platform
 uv sync
 cp .env.example .env
-PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:app --reload
+PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:create_app --factory --reload
 ```
 
 ## Project Structure
@@ -108,7 +112,7 @@ uv run pytest
 
 ## Status
 
-Current implementation scope: ingestability verification and preview output, not full persistence/indexing/retrieval yet.
+Current implementation scope: ingestion verification and preview output, not full persistence/indexing/retrieval yet.
 
 Current focus:
 
@@ -128,7 +132,6 @@ Next phase:
 
 Observability follow-ups:
 
-- metric path normalization when parameterized routes appear
 - dashboards and alerts
 - centralized log aggregation at deploy stage
 - OpenTelemetry once service boundaries increase

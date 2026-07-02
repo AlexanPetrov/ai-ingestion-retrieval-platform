@@ -1,13 +1,17 @@
+"""Structured JSON logging configuration for application and request logs."""
+
 import logging
 import sys
 
 import structlog
 
-from ai_ingestion_retrieval_platform.core.config import get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
 
 
-def configure_logging() -> None:
-    settings = get_settings()
+def configure_logging(settings: Settings | None = None) -> None:
+    if settings is None:
+        settings = get_settings()
+
     level_name = settings.log_level.upper()
     level = getattr(logging, level_name, logging.INFO)
 
@@ -15,6 +19,7 @@ def configure_logging() -> None:
         format="%(message)s",
         stream=sys.stdout,
         level=level,
+        force=True,
     )
 
     structlog.configure(

@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from tenacity import stop_after_attempt, wait_none
 
+from ai_ingestion_retrieval_platform.core.limits import clear_limiters
 from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
 
@@ -104,9 +105,7 @@ async def test_fetch_url_retries_retryable_http_status_and_eventually_succeeds(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(3),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(3)
     )
 
     call_count = 0
@@ -135,9 +134,7 @@ async def test_fetch_url_does_not_retry_read_timeout(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(5),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
     )
 
     call_count = 0
@@ -163,9 +160,7 @@ async def test_fetch_url_retries_connect_error_until_stop(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(3),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(3)
     )
 
     call_count = 0
@@ -191,9 +186,7 @@ async def test_fetch_url_does_not_retry_connect_error_for_post_method(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(5),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
     )
 
     call_count = 0
@@ -223,9 +216,7 @@ async def test_fetch_url_does_not_retry_retryable_http_status_for_post_method(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(5),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
     )
 
     call_count = 0
@@ -255,9 +246,7 @@ async def test_fetch_url_emits_retry_observability_signals(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
     monkeypatch.setattr(
-        ingestion_service.fetch_url.retry,
-        "stop",
-        stop_after_attempt(2),
+        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(2)
     )
 
     warning_calls: list[dict[str, object]] = []
@@ -296,7 +285,6 @@ async def test_fetch_url_emits_retry_observability_signals(
     assert warning_calls[0]["url"] == "https://example.com"
     assert warning_calls[0]["attempt_number"] == 1
     assert warning_calls[0]["error_type"] == "ConnectError"
-
     assert retry_metric_calls == [{"error_type": "ConnectError"}]
 
 
@@ -607,7 +595,7 @@ async def test_fetch_url_limits_same_host_concurrency(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.settings, "host_max_concurrency", 2)
     monkeypatch.setattr(ingestion_service.settings, "host_limiter_cache_size", 1024)
-    ingestion_service.host_limiters.clear()
+    clear_limiters()
 
     in_flight = 0
     peak_in_flight = 0
@@ -640,7 +628,9 @@ async def test_fetch_url_limits_same_host_concurrency(
             return httpx.Request(method, url, headers=headers, extensions=extensions)
 
         async def send(
-            self, request: httpx.Request, stream: bool = True
+            self,
+            request: httpx.Request,
+            stream: bool = True,
         ) -> _FakeResponse:
             nonlocal in_flight, peak_in_flight
             assert stream is True
@@ -671,7 +661,7 @@ async def test_fetch_url_allows_parallelism_across_different_hosts(
     monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
     monkeypatch.setattr(ingestion_service.settings, "host_max_concurrency", 1)
     monkeypatch.setattr(ingestion_service.settings, "host_limiter_cache_size", 1024)
-    ingestion_service.host_limiters.clear()
+    clear_limiters()
 
     host_in_flight: dict[str, int] = {}
     host_peak: dict[str, int] = {}
@@ -706,7 +696,9 @@ async def test_fetch_url_allows_parallelism_across_different_hosts(
             return httpx.Request(method, url, headers=headers, extensions=extensions)
 
         async def send(
-            self, request: httpx.Request, stream: bool = True
+            self,
+            request: httpx.Request,
+            stream: bool = True,
         ) -> _FakeResponse:
             nonlocal total_in_flight, total_peak
             assert stream is True

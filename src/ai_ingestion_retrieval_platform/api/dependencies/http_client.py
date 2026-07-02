@@ -1,3 +1,5 @@
+"""FastAPI dependency for accessing the shared outbound HTTP client."""
+
 import httpx
 from fastapi import Request
 

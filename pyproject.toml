@@ -1,3 +1,5 @@
+# Engineering Contract: defines the project package, supported Python version, dependencies, and test/lint tooling.
+
 [project]
 name = "ai-ingestion-retrieval-platform"
 version = "0.1.0"
