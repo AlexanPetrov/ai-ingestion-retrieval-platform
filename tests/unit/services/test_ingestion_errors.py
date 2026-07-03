@@ -38,4 +38,3 @@ def test_build_ingestion_error_maps_to_expected_error_code(
     assert result.code == expected_code
     assert result.message == detail
     assert result.status_code == status_code
-    

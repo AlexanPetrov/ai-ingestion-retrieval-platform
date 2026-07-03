@@ -12,8 +12,10 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi[standard]>=0.136.3",
     "httpx>=0.28.1",
+    "limits[async-redis]>=5.8.0",
     "prometheus-client>=0.25.0",
     "pydantic-settings>=2.14.1",
+    "redis>=8.0.1",
     "structlog>=25.5.0",
     "tenacity>=9.1.4",
 ]

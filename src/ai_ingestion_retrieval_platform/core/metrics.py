@@ -65,3 +65,15 @@ INGESTION_BATCH_IN_FLIGHT = Gauge(
     "ingestion_batch_in_flight",
     "Current number of active URL preview operations inside a batch.",
 )
+
+INBOUND_RATE_LIMIT_TOTAL = Counter(
+    "inbound_rate_limit_total",
+    "Total inbound API rate-limit decisions.",
+    ["policy", "result"],
+)
+
+INBOUND_RATE_LIMIT_STORAGE_ERROR_TOTAL = Counter(
+    "inbound_rate_limit_storage_error_total",
+    "Total inbound API rate-limit storage failures.",
+    ["policy"],
+)

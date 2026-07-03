@@ -240,6 +240,8 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
         message=detail,
         status_code=exc.status_code,
     )
+
+
 @retry(
     retry=retry_if_exception(is_retryable_exception),
     stop=stop_after_attempt(settings.retry_attempts)
@@ -349,10 +351,12 @@ async def preview_url(
         response = await fetch_url(client, url_str, url_timeout=url_timeout)
 
     except HTTPException:
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         raise
 
     except TimeoutError as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         INGESTION_URL_TIMEOUT_TOTAL.labels(reason="asyncio_timeout").inc()
 
         logger.warning(
@@ -369,6 +373,7 @@ async def preview_url(
 
     except httpx.TimeoutException as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
         INGESTION_URL_TIMEOUT_TOTAL.labels(reason=type(exc).__name__).inc()
 
         logger.warning(
@@ -386,6 +391,7 @@ async def preview_url(
     except httpx.HTTPStatusError as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
         upstream_status_code = exc.response.status_code
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
 
         logger.warning(
             "url_preview_failed",
@@ -402,6 +408,7 @@ async def preview_url(
 
     except httpx.HTTPError as exc:
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
 
         logger.warning(
             "url_preview_failed",
@@ -416,6 +423,7 @@ async def preview_url(
         ) from exc
 
     elapsed_ms = round((perf_counter() - start) * 1000, 2)
+    INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
 
     logger.info(
         "url_preview_completed",
@@ -463,8 +471,6 @@ async def preview_urls(
                     url_timeout=settings.url_timeout_seconds,
                 )
 
-                INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
-
                 return UrlIngestionBatchResult(
                     url=str(url),
                     success=True,
@@ -473,8 +479,6 @@ async def preview_urls(
                 )
 
             except HTTPException as exc:
-                INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
-
                 return UrlIngestionBatchResult(
                     url=str(url),
                     success=False,

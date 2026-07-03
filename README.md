@@ -28,6 +28,8 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - URL credential rejection for safer outbound ingestion
 - Normalized request metric paths to avoid high-cardinality Prometheus labels
 - Per-host limiter wait metrics for outbound saturation visibility
+- Redis-backed inbound API rate limiting for ingestion routes
+- Rate-limit metrics for allowed, blocked, and storage-error decisions
 
 ## Stack
 
@@ -45,6 +47,8 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - pytest-cov
 - pytest-mock
 - respx
+- Redis
+- limits
 
 ## Setup
 

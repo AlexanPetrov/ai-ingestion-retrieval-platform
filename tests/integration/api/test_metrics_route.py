@@ -113,3 +113,5 @@ async def test_metrics_route_exposes_project_metric_families(
     assert "ingestion_outbound_in_flight" in payload
     assert "ingestion_batch_in_flight" in payload
     assert "ingestion_host_limiter_wait_seconds" in payload
+    assert "inbound_rate_limit_total" in payload
+    assert "inbound_rate_limit_storage_error_total" in payload

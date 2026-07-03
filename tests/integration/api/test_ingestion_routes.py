@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from ai_ingestion_retrieval_platform.api.routes import ingestion as ingestion_routes
-from ai_ingestion_retrieval_platform.core.config import get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
 from ai_ingestion_retrieval_platform.main import create_app
 
 
@@ -157,3 +157,118 @@ async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
     app.state.http_client = None
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_url_preview_route_returns_429_when_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(
+        Settings(
+            rate_limit_enabled=True,
+            rate_limit_redis_url="async+memory://",
+            rate_limit_url_preview_requests=1,
+            rate_limit_url_preview_window_seconds=60,
+        )
+    )
+
+    async def fake_preview_url(
+        url: object,
+        _client: httpx.AsyncClient,
+    ) -> dict[str, object]:
+        url_str = str(url)
+        return {
+            "url": url_str,
+            "status_code": 200,
+            "content_type": "text/html",
+            "content_length": 3,
+            "elapsed_ms": 1.2,
+            "preview": "ok",
+        }
+
+    monkeypatch.setattr(ingestion_routes, "preview_url", fake_preview_url)
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            first_response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "https://example.com"},
+            )
+            second_response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "https://example.com"},
+            )
+
+    app.state.http_client = None
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json() == {"detail": "Rate limit exceeded"}
+    assert int(second_response.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_urls_preview_route_returns_429_when_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(
+        Settings(
+            rate_limit_enabled=True,
+            rate_limit_redis_url="async+memory://",
+            rate_limit_batch_preview_requests=1,
+            rate_limit_batch_preview_window_seconds=60,
+        )
+    )
+
+    async def fake_preview_urls(
+        urls: list[object],
+        max_concurrency: int,
+        client: httpx.AsyncClient,
+    ) -> list[dict[str, object]]:
+        assert isinstance(client, httpx.AsyncClient)
+        normalized_urls = [str(url) for url in urls]
+        return [
+            {
+                "url": normalized_urls[0],
+                "success": True,
+                "data": {
+                    "url": normalized_urls[0],
+                    "status_code": 200,
+                    "content_type": "text/plain",
+                    "content_length": 2,
+                    "elapsed_ms": 0.5,
+                    "preview": "ok",
+                },
+                "error": None,
+            }
+        ]
+
+    monkeypatch.setattr(ingestion_routes, "preview_urls", fake_preview_urls)
+
+    payload = {
+        "urls": ["https://example.com"],
+    }
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            first_response = await client.post("/ingestion/urls/preview", json=payload)
+            second_response = await client.post("/ingestion/urls/preview", json=payload)
+
+    app.state.http_client = None
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json() == {"detail": "Rate limit exceeded"}
+    assert int(second_response.headers["retry-after"]) >= 1

@@ -13,11 +13,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "AI Ingestion & Retrieval Platform"
-    log_level: str = "INFO"
-    metrics_enabled: bool = False
-    metrics_token: str | None = None
+    # Application and metrics settings
+    # main.py, core/logging.py, api/routes/metrics.py
+    app_name: str = "AI Ingestion & Retrieval Platform"  # FastAPI app title.
+    log_level: str = "INFO"  # Minimum log level.
+    metrics_enabled: bool = False  # Enable or hide /metrics endpoint.
+    metrics_token: str | None = None  # Bearer token for /metrics access.
 
+    # Timeouts
+    # main.py
     http_timeout_connect_seconds: float = Field(
         default=2.0, gt=0
     )  # Max time to open connection.
@@ -30,6 +34,9 @@ class Settings(BaseSettings):
     http_timeout_pool_seconds: float = Field(
         default=2.0, gt=0
     )  # Max wait for free pooled connection.
+
+    # Connection pool limits
+    # main.py
     http_max_connections: int = Field(
         default=20, ge=1
     )  # Max total outbound HTTP connections.
@@ -40,23 +47,62 @@ class Settings(BaseSettings):
         default=30.0, gt=0
     )  # How long idle connections stay open.
 
-    max_redirects: int = Field(default=5, ge=0)
-    max_preview_bytes: int = Field(default=65_536, ge=1)
-    max_preview_text_chars: int = Field(default=500, ge=1)
-    max_batch_urls: int = Field(default=20, ge=1)
-    allowed_fetch_ports: tuple[int, ...] = (80, 443)
+    # Ingestion safety and preview limits
+    # services/ingestion.py, schemas/ingestion.py, core/url_safety.py
+    max_redirects: int = Field(default=5, ge=0)  # Max redirect hops per URL fetch.
+    max_preview_bytes: int = Field(default=65_536, ge=1)  # Max response bytes to read.
+    max_preview_text_chars: int = Field(default=500, ge=1)  # Max preview text returned.
+    max_batch_urls: int = Field(
+        default=20, ge=1
+    )  # Max URLs accepted per batch request.
+    allowed_fetch_ports: tuple[int, ...] = (80, 443)  # Allowed outbound URL ports.
 
-    retry_attempts: int = Field(default=3, ge=1)
-    retry_total_timeout_seconds: float = Field(default=10.0, gt=0)
-    retry_backoff_initial_seconds: float = Field(default=0.5, gt=0)
-    retry_backoff_max_seconds: float = Field(default=4.0, gt=0)
-    url_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Retry and per-URL timeout policy
+    # services/ingestion.py
+    retry_attempts: int = Field(default=3, ge=1)  # Max retry attempts per URL fetch.
+    retry_total_timeout_seconds: float = Field(
+        default=10.0, gt=0
+    )  # Max total retry time.
+    retry_backoff_initial_seconds: float = Field(
+        default=0.5, gt=0
+    )  # First backoff delay.
+    retry_backoff_max_seconds: float = Field(default=4.0, gt=0)  # Max backoff delay.
+    url_timeout_seconds: float = Field(default=10.0, gt=0)  # Max total time per URL.
 
-    default_max_concurrency: int = Field(default=3, ge=1)
-    max_allowed_concurrency: int = Field(default=10, ge=1)
-    global_max_outbound_fetches: int = Field(default=24, ge=1)
-    host_max_concurrency: int = Field(default=3, ge=1)
-    host_limiter_cache_size: int = Field(default=1024, ge=1)
+    # Concurrency and limiter controls
+    # schemas/ingestion.py, services/ingestion.py, core/limits.py
+    default_max_concurrency: int = Field(default=3, ge=1)  # Default batch concurrency.
+    max_allowed_concurrency: int = Field(
+        default=10, ge=1
+    )  # Max client-requested concurrency.
+    global_max_outbound_fetches: int = Field(
+        default=24, ge=1
+    )  # Max outbound fetches per process.
+    host_max_concurrency: int = Field(
+        default=3, ge=1
+    )  # Max concurrent fetches per host.
+    host_limiter_cache_size: int = Field(
+        default=1024, ge=1
+    )  # Max host limiters cached.
+
+    # Inbound API rate limiting
+    # main.py, api/dependencies/rate_limit.py, api/routes/ingestion.py
+    rate_limit_enabled: bool = False  # Enable inbound API rate limiting.
+    rate_limit_redis_url: str = "redis://localhost:6379/0"  # Redis limiter store.
+    rate_limit_key_prefix: str = "ai-irp:rate-limit"  # Redis key prefix.
+    rate_limit_fail_open: bool = False  # Allow requests if limiter storage fails.
+    rate_limit_url_preview_requests: int = Field(
+        default=30, ge=1
+    )  # Single URL preview requests per window.
+    rate_limit_url_preview_window_seconds: int = Field(
+        default=60, ge=1
+    )  # Single URL preview window size.
+    rate_limit_batch_preview_requests: int = Field(
+        default=10, ge=1
+    )  # Batch preview requests per window.
+    rate_limit_batch_preview_window_seconds: int = Field(
+        default=60, ge=1
+    )  # Batch preview window size.
 
 
 @lru_cache
