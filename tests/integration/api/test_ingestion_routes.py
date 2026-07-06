@@ -12,7 +12,7 @@ from ai_ingestion_retrieval_platform.main import create_app
 async def test_url_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app()
+    app = create_app(Settings(rate_limit_enabled=False))
 
     async def fake_preview_url(
         url: object,
@@ -58,10 +58,67 @@ async def test_url_preview_route_returns_expected_contract(
 
 
 @pytest.mark.asyncio
+async def test_url_parse_preview_route_returns_expected_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(Settings(rate_limit_enabled=False))
+
+    async def fake_preview_parsed_url(
+        url: object,
+        _client: httpx.AsyncClient,
+    ) -> dict[str, object]:
+        url_str = str(url)
+        return {
+            "url": url_str,
+            "status_code": 200,
+            "content_type": "application/pdf",
+            "content_length": 128,
+            "elapsed_ms": 2.4,
+            "parsed_content_type": "application/pdf",
+            "parsed_char_length": 11,
+            "parsed_preview": "hello pdf",
+        }
+
+    monkeypatch.setattr(
+        ingestion_routes,
+        "preview_parsed_url",
+        fake_preview_parsed_url,
+    )
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/url/parse-preview",
+                json={"url": "https://example.com/file.pdf"},
+            )
+
+    app.state.http_client = None
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "url": "https://example.com/file.pdf",
+        "status_code": 200,
+        "content_type": "application/pdf",
+        "content_length": 128,
+        "elapsed_ms": 2.4,
+        "parsed_content_type": "application/pdf",
+        "parsed_char_length": 11,
+        "parsed_preview": "hello pdf",
+    }
+    assert response.headers.get("x-request-id")
+
+
+@pytest.mark.asyncio
 async def test_urls_preview_route_forwards_urls_and_default_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app()
+    app = create_app(Settings(rate_limit_enabled=False))
     captured: dict[str, object] = {}
 
     async def fake_preview_urls(
@@ -114,8 +171,73 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
 
 
 @pytest.mark.asyncio
+async def test_urls_parse_preview_route_forwards_urls_and_default_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(Settings(rate_limit_enabled=False))
+    captured: dict[str, object] = {}
+
+    async def fake_preview_parsed_urls(
+        urls: list[object],
+        max_concurrency: int,
+        client: httpx.AsyncClient,
+    ) -> list[dict[str, object]]:
+        assert isinstance(client, httpx.AsyncClient)
+        normalized_urls = [str(url) for url in urls]
+        captured["urls"] = normalized_urls
+        captured["max_concurrency"] = max_concurrency
+        return [
+            {
+                "url": normalized_urls[0],
+                "success": True,
+                "data": {
+                    "url": normalized_urls[0],
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "content_length": 10,
+                    "elapsed_ms": 0.8,
+                    "parsed_content_type": "text/html",
+                    "parsed_char_length": 5,
+                    "parsed_preview": "hello",
+                },
+                "error": None,
+            }
+        ]
+
+    monkeypatch.setattr(
+        ingestion_routes,
+        "preview_parsed_urls",
+        fake_preview_parsed_urls,
+    )
+
+    payload = {
+        "urls": ["https://example.com"],
+    }
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/urls/parse-preview",
+                json=payload,
+            )
+
+    app.state.http_client = None
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert captured["urls"] == ["https://example.com/"]
+    assert captured["max_concurrency"] == get_settings().default_max_concurrency
+
+
+@pytest.mark.asyncio
 async def test_url_preview_route_rejects_invalid_url() -> None:
-    app = create_app()
+    app = create_app(Settings(rate_limit_enabled=False))
 
     async with httpx.AsyncClient() as shared_client:
         app.state.http_client = shared_client
@@ -137,7 +259,7 @@ async def test_url_preview_route_rejects_invalid_url() -> None:
 
 @pytest.mark.asyncio
 async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
-    app = create_app()
+    app = create_app(Settings(rate_limit_enabled=False))
 
     payload = {
         "urls": ["https://example.com"],
@@ -265,6 +387,79 @@ async def test_urls_preview_route_returns_429_when_rate_limited(
         ) as client:
             first_response = await client.post("/ingestion/urls/preview", json=payload)
             second_response = await client.post("/ingestion/urls/preview", json=payload)
+
+    app.state.http_client = None
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json() == {"detail": "Rate limit exceeded"}
+    assert int(second_response.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_urls_parse_preview_route_returns_429_when_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(
+        Settings(
+            rate_limit_enabled=True,
+            rate_limit_redis_url="async+memory://",
+            rate_limit_batch_preview_requests=1,
+            rate_limit_batch_preview_window_seconds=60,
+        )
+    )
+
+    async def fake_preview_parsed_urls(
+        urls: list[object],
+        max_concurrency: int,
+        client: httpx.AsyncClient,
+    ) -> list[dict[str, object]]:
+        assert isinstance(client, httpx.AsyncClient)
+        normalized_urls = [str(url) for url in urls]
+        return [
+            {
+                "url": normalized_urls[0],
+                "success": True,
+                "data": {
+                    "url": normalized_urls[0],
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "content_length": 10,
+                    "elapsed_ms": 0.8,
+                    "parsed_content_type": "text/html",
+                    "parsed_char_length": 5,
+                    "parsed_preview": "hello",
+                },
+                "error": None,
+            }
+        ]
+
+    monkeypatch.setattr(
+        ingestion_routes,
+        "preview_parsed_urls",
+        fake_preview_parsed_urls,
+    )
+
+    payload = {
+        "urls": ["https://example.com"],
+    }
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            first_response = await client.post(
+                "/ingestion/urls/parse-preview",
+                json=payload,
+            )
+            second_response = await client.post(
+                "/ingestion/urls/parse-preview",
+                json=payload,
+            )
 
     app.state.http_client = None
 

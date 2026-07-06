@@ -41,7 +41,11 @@ from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionBatchResult,
     UrlIngestionError,
     UrlIngestionPreview,
+    UrlParsedIngestionBatchResult,
+    UrlParsedIngestionPreview,
 )
+from ai_ingestion_retrieval_platform.schemas.parsing import ParseRequest
+from ai_ingestion_retrieval_platform.services.parsing import parse_document
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -214,6 +218,20 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
             status_code=exc.status_code,
         )
 
+    if exc.status_code == 413:
+        return UrlIngestionError(
+            code="content_too_large",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
+    if exc.status_code == 415:
+        return UrlIngestionError(
+            code="unsupported_content_type",
+            message=detail,
+            status_code=exc.status_code,
+        )
+
     if exc.status_code == 504:
         return UrlIngestionError(
             code="timeout",
@@ -255,10 +273,12 @@ async def fetch_url(
     url: str,
     method: str = "GET",
     url_timeout: float | None = None,
+    max_bytes: int | None = None,
 ) -> httpx.Response:
     timeout_seconds = (
         settings.url_timeout_seconds if url_timeout is None else url_timeout
     )
+    byte_limit = settings.max_preview_bytes if max_bytes is None else max_bytes
     outbound_fetch_limiter = get_outbound_fetch_limiter(settings)
 
     wait_start = perf_counter()
@@ -312,7 +332,7 @@ async def fetch_url(
                         body = bytearray()
 
                         async for chunk in response.aiter_bytes():
-                            remaining = settings.max_preview_bytes - len(body)
+                            remaining = byte_limit - len(body)
 
                             if remaining <= 0:
                                 break
@@ -443,6 +463,130 @@ async def preview_url(
     )
 
 
+async def preview_parsed_url(
+    url: AnyHttpUrl,
+    client: httpx.AsyncClient,
+    url_timeout: float | None = None,
+) -> UrlParsedIngestionPreview:
+    start = perf_counter()
+    url_str = str(url)
+
+    logger.info("url_parse_preview_started", url=url_str)
+
+    try:
+        response = await fetch_url(
+            client,
+            url_str,
+            url_timeout=url_timeout,
+            max_bytes=settings.max_parse_bytes,
+        )
+
+        parsed = await parse_document(
+            ParseRequest(
+                content=response.content,
+                content_type=response.headers.get("content-type")
+                or "application/octet-stream",
+                source_url=url_str,
+            ),
+            settings=settings,
+        )
+
+    except HTTPException:
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+        raise
+
+    except TimeoutError as exc:
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+        INGESTION_URL_TIMEOUT_TOTAL.labels(reason="asyncio_timeout").inc()
+
+        logger.warning(
+            "url_parse_preview_failed",
+            url=url_str,
+            error_type="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+
+        raise HTTPException(
+            status_code=504,
+            detail=ERROR_TIMEOUT,
+        ) from exc
+
+    except httpx.TimeoutException as exc:
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+        INGESTION_URL_TIMEOUT_TOTAL.labels(reason=type(exc).__name__).inc()
+
+        logger.warning(
+            "url_parse_preview_failed",
+            url=url_str,
+            error_type="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+
+        raise HTTPException(
+            status_code=504,
+            detail=ERROR_TIMEOUT,
+        ) from exc
+
+    except httpx.HTTPStatusError as exc:
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        upstream_status_code = exc.response.status_code
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
+        logger.warning(
+            "url_parse_preview_failed",
+            url=url_str,
+            error_type="http_status",
+            upstream_status_code=upstream_status_code,
+            elapsed_ms=elapsed_ms,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"URL returned HTTP {upstream_status_code}",
+        ) from exc
+
+    except httpx.HTTPError as exc:
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
+
+        logger.warning(
+            "url_parse_preview_failed",
+            url=url_str,
+            error_type="network_error",
+            elapsed_ms=elapsed_ms,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=ERROR_FETCH_FAILED,
+        ) from exc
+
+    elapsed_ms = round((perf_counter() - start) * 1000, 2)
+    INGESTION_URL_PREVIEW_TOTAL.labels(result="success").inc()
+
+    logger.info(
+        "url_parse_preview_completed",
+        url=url_str,
+        status_code=response.status_code,
+        content_length=len(response.content),
+        parsed_char_length=parsed.char_length,
+        elapsed_ms=elapsed_ms,
+    )
+
+    return UrlParsedIngestionPreview(
+        url=url_str,
+        status_code=response.status_code,
+        content_type=response.headers.get("content-type"),
+        content_length=len(response.content),
+        elapsed_ms=elapsed_ms,
+        parsed_content_type=parsed.content_type,
+        parsed_char_length=parsed.char_length,
+        parsed_preview=parsed.text[: settings.max_preview_text_chars],
+    )
+
+
 async def preview_urls(
     urls: list[AnyHttpUrl],
     max_concurrency: int,
@@ -506,6 +650,80 @@ async def preview_urls(
 
     logger.info(
         "batch_preview_completed",
+        url_count=len(urls),
+        success_count=success_count,
+        failure_count=failure_count,
+        elapsed_ms=elapsed_ms,
+    )
+
+    return results
+
+
+async def preview_parsed_urls(
+    urls: list[AnyHttpUrl],
+    max_concurrency: int,
+    client: httpx.AsyncClient,
+) -> list[UrlParsedIngestionBatchResult]:
+    logger.info(
+        "batch_parse_preview_started",
+        url_count=len(urls),
+        max_concurrency=max_concurrency,
+    )
+
+    start = perf_counter()
+    batch_limiter = create_batch_limiter(max_concurrency)
+
+    async def preview_with_limit(
+        url: AnyHttpUrl,
+    ) -> UrlParsedIngestionBatchResult:
+        wait_start = perf_counter()
+        await batch_limiter.acquire()
+        INGESTION_BATCH_LIMITER_WAIT_SECONDS.observe(perf_counter() - wait_start)
+        INGESTION_BATCH_IN_FLIGHT.inc()
+
+        try:
+            try:
+                preview = await preview_parsed_url(
+                    url,
+                    client,
+                    url_timeout=settings.url_timeout_seconds,
+                )
+
+                return UrlParsedIngestionBatchResult(
+                    url=str(url),
+                    success=True,
+                    data=preview,
+                    error=None,
+                )
+
+            except HTTPException as exc:
+                return UrlParsedIngestionBatchResult(
+                    url=str(url),
+                    success=False,
+                    data=None,
+                    error=build_ingestion_error(exc),
+                )
+        finally:
+            INGESTION_BATCH_IN_FLIGHT.dec()
+            batch_limiter.release()
+
+    results = await asyncio.gather(*(preview_with_limit(url) for url in urls))
+
+    elapsed_seconds = perf_counter() - start
+    elapsed_ms = round(elapsed_seconds * 1000, 2)
+
+    success_count = sum(1 for result in results if result.success)
+    failure_count = len(results) - success_count
+
+    if failure_count:
+        INGESTION_BATCH_PREVIEW_TOTAL.labels(result="partial_failure").inc()
+    else:
+        INGESTION_BATCH_PREVIEW_TOTAL.labels(result="success").inc()
+
+    INGESTION_BATCH_DURATION_SECONDS.observe(elapsed_seconds)
+
+    logger.info(
+        "batch_parse_preview_completed",
         url_count=len(urls),
         success_count=success_count,
         failure_count=failure_count,

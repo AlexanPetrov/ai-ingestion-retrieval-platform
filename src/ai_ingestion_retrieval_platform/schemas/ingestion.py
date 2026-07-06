@@ -1,4 +1,4 @@
-"""Pydantic request and response schemas for ingestion APIs."""
+"""Pydantic schemas for ingestion preview requests and responses."""
 
 from pydantic import AnyHttpUrl, BaseModel, Field
 
@@ -7,9 +7,6 @@ from ai_ingestion_retrieval_platform.core.config import get_settings
 settings = get_settings()
 
 
-# Config-backed schema constraints are evaluated at import time.
-# If tests or deployments need per-app dynamic limits, move these checks
-# into route/dependency validation using request.app.state.settings.
 class UrlIngestionRequest(BaseModel):
     url: AnyHttpUrl = Field(
         examples=["https://example.com"],
@@ -18,6 +15,9 @@ class UrlIngestionRequest(BaseModel):
 
 
 class BatchUrlIngestionRequest(BaseModel):
+    # Future note: these schema limits are loaded at import time.
+    # Move validation into route/dependency logic if per-app dynamic
+    # settings are needed.
     urls: list[AnyHttpUrl] = Field(
         min_length=1,
         max_length=settings.max_batch_urls,
@@ -41,6 +41,17 @@ class UrlIngestionPreview(BaseModel):
     preview: str
 
 
+class UrlParsedIngestionPreview(BaseModel):
+    url: str
+    status_code: int
+    content_type: str | None
+    content_length: int
+    elapsed_ms: float
+    parsed_content_type: str
+    parsed_char_length: int
+    parsed_preview: str
+
+
 class UrlIngestionError(BaseModel):
     code: str
     message: str
@@ -51,4 +62,11 @@ class UrlIngestionBatchResult(BaseModel):
     url: str
     success: bool
     data: UrlIngestionPreview | None
+    error: UrlIngestionError | None
+
+
+class UrlParsedIngestionBatchResult(BaseModel):
+    url: str
+    success: bool
+    data: UrlParsedIngestionPreview | None
     error: UrlIngestionError | None

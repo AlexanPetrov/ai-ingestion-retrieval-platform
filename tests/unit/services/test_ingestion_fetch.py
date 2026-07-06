@@ -10,6 +10,7 @@ from tenacity import stop_after_attempt, wait_none
 
 from ai_ingestion_retrieval_platform.core.limits import clear_limiters
 from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
+from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
 
 
@@ -96,6 +97,29 @@ async def test_fetch_url_caps_response_body_by_max_preview_bytes(
 
     assert response.status_code == 200
     assert response.content == b"abcde"
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_respects_explicit_max_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(ingestion_service.settings, "max_preview_bytes", 5)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, content=b"abcdefghij", request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await ingestion_service.fetch_url(
+            client,
+            "https://example.com",
+            max_bytes=8,
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"abcdefgh"
 
 
 @pytest.mark.asyncio
@@ -482,6 +506,74 @@ async def test_preview_url_returns_expected_preview_payload(
     assert result.content_type == "text/plain"
     assert result.content_length == 6
     assert result.preview == "abcd"
+
+
+@pytest.mark.asyncio
+async def test_preview_parsed_url_returns_expected_preview_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service.settings, "max_preview_text_chars", 6)
+    monkeypatch.setattr(ingestion_service.settings, "max_parse_bytes", 1234)
+
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_url(
+        _client: object,
+        url: str,
+        method: str = "GET",
+        url_timeout: float | None = None,
+        max_bytes: int | None = None,
+    ) -> httpx.Response:
+        captured["url"] = url
+        captured["method"] = method
+        captured["url_timeout"] = url_timeout
+        captured["max_bytes"] = max_bytes
+
+        request = httpx.Request(method, url)
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            content=b"raw pdf bytes",
+            request=request,
+        )
+
+    async def fake_parse_document(
+        request: object,
+        settings: object,
+    ) -> ParsedDocument:
+        captured["parse_content"] = request.content
+        captured["parse_content_type"] = request.content_type
+        captured["parse_source_url"] = request.source_url
+        captured["parse_settings"] = settings
+
+        return ParsedDocument(
+            text="parsed document text",
+            content_type="application/pdf",
+            source_url=request.source_url,
+            byte_length=len(request.content),
+            char_length=20,
+        )
+
+    monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
+    monkeypatch.setattr(ingestion_service, "parse_document", fake_parse_document)
+
+    result = await ingestion_service.preview_parsed_url(
+        url="https://example.com/file.pdf",
+        client=object(),
+    )
+
+    assert result.url == "https://example.com/file.pdf"
+    assert result.status_code == 200
+    assert result.content_type == "application/pdf"
+    assert result.content_length == len(b"raw pdf bytes")
+    assert result.parsed_content_type == "application/pdf"
+    assert result.parsed_char_length == 20
+    assert result.parsed_preview == "parsed"
+    assert captured["max_bytes"] == 1234
+    assert captured["parse_content"] == b"raw pdf bytes"
+    assert captured["parse_content_type"] == "application/pdf"
+    assert captured["parse_source_url"] == "https://example.com/file.pdf"
+    assert captured["parse_settings"] is ingestion_service.settings
 
 
 @pytest.mark.asyncio

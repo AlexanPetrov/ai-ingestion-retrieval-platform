@@ -31,6 +31,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Redis-backed inbound API rate limiting for ingestion routes
 - Rate-limit metrics for allowed, blocked, and storage-error decisions
 - Local parser boundary with text, HTML, and PDF extraction
+- Parsed URL preview routes for single and batch ingestion previews
 
 ## Stack
 
@@ -51,6 +52,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Redis
 - limits
 - pypdf
+- beautifulsoup4
 
 ## Setup
 

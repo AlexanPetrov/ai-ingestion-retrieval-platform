@@ -3,6 +3,7 @@
 import asyncio
 from io import BytesIO
 
+from bs4 import BeautifulSoup
 from fastapi import HTTPException
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
@@ -25,8 +26,11 @@ def _truncate_text(text: str, settings: Settings) -> str:
     return text[: settings.max_parsed_text_chars]
 
 
-def _parse_text_content(request: ParseRequest, settings: Settings) -> ParsedDocument:
-    text = request.content.decode("utf-8", errors="replace")
+def _build_parsed_document(
+    request: ParseRequest,
+    settings: Settings,
+    text: str,
+) -> ParsedDocument:
     text = _truncate_text(text, settings)
 
     return ParsedDocument(
@@ -36,6 +40,22 @@ def _parse_text_content(request: ParseRequest, settings: Settings) -> ParsedDocu
         byte_length=len(request.content),
         char_length=len(text),
     )
+
+
+def _parse_text_content(request: ParseRequest, settings: Settings) -> ParsedDocument:
+    text = request.content.decode("utf-8", errors="replace")
+    return _build_parsed_document(request, settings, text)
+
+
+def _parse_html_content(request: ParseRequest, settings: Settings) -> ParsedDocument:
+    html = request.content.decode("utf-8", errors="replace")
+    soup = BeautifulSoup(html, "html.parser")
+
+    for element in soup(["script", "style", "noscript"]):
+        element.decompose()
+
+    text = soup.get_text(separator="\n", strip=True)
+    return _build_parsed_document(request, settings, text)
 
 
 def _parse_pdf_content(request: ParseRequest, settings: Settings) -> ParsedDocument:
@@ -66,15 +86,7 @@ def _parse_pdf_content(request: ParseRequest, settings: Settings) -> ParsedDocum
             detail=ERROR_PARSE_PDF_MALFORMED,
         ) from exc
 
-    text = _truncate_text("\n".join(page_text), settings)
-
-    return ParsedDocument(
-        text=text,
-        content_type=_normalize_content_type(request.content_type),
-        source_url=request.source_url,
-        byte_length=len(request.content),
-        char_length=len(text),
-    )
+    return _build_parsed_document(request, settings, "\n".join(page_text))
 
 
 def _parse_document_sync(
@@ -95,8 +107,11 @@ def _parse_document_sync(
             detail=ERROR_PARSE_CONTENT_TOO_LARGE,
         )
 
-    if normalized_content_type in {"text/plain", "text/html"}:
+    if normalized_content_type == "text/plain":
         return _parse_text_content(request, settings)
+
+    if normalized_content_type == "text/html":
+        return _parse_html_content(request, settings)
 
     if normalized_content_type == "application/pdf":
         return _parse_pdf_content(request, settings)

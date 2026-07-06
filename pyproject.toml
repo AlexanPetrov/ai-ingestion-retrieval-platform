@@ -10,6 +10,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "fastapi[standard]>=0.136.3",
     "httpx>=0.28.1",
     "limits[async-redis]>=5.8.0",

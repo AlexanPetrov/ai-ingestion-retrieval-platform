@@ -59,6 +59,42 @@ async def test_parse_document_truncates_parsed_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_parse_document_extracts_readable_html_text() -> None:
+    result = await parsing_service.parse_document(
+        ParseRequest(
+            content=(
+                b"<html><head><style>.hidden{display:none}</style>"
+                b"<script>alert('no')</script></head>"
+                b"<body><h1>Hello</h1><p>Readable text</p></body></html>"
+            ),
+            content_type="text/html; charset=utf-8",
+            source_url="https://example.com/page",
+        ),
+        settings=Settings(),
+    )
+
+    assert result.content_type == "text/html"
+    assert result.source_url == "https://example.com/page"
+    assert result.text == "Hello\nReadable text"
+    assert "alert" not in result.text
+    assert "display:none" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_parse_document_truncates_html_text() -> None:
+    result = await parsing_service.parse_document(
+        ParseRequest(
+            content=b"<html><body><p>abcdef</p></body></html>",
+            content_type="text/html",
+        ),
+        settings=Settings(max_parsed_text_chars=3),
+    )
+
+    assert result.text == "abc"
+    assert result.char_length == 3
+
+
+@pytest.mark.asyncio
 async def test_parse_document_parses_pdf_text() -> None:
     pdf_bytes = build_text_pdf(["hello pdf parser"])
 
