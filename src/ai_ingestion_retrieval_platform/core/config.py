@@ -57,6 +57,20 @@ class Settings(BaseSettings):
     )  # Max URLs accepted per batch request.
     allowed_fetch_ports: tuple[int, ...] = (80, 443)  # Allowed outbound URL ports.
 
+    # Parser boundary limits
+    # services/parsing.py
+    max_parse_bytes: int = Field(default=5_000_000, ge=1)  # Max bytes sent to parser.
+    max_parsed_text_chars: int = Field(
+        default=100_000, ge=1
+    )  # Max parsed text returned.
+    max_parse_pages: int = Field(default=50, ge=1)  # Max PDF pages to parse.
+    parse_timeout_seconds: float = Field(default=10.0, gt=0)  # Max parser runtime.
+    allowed_parse_content_types: tuple[str, ...] = (
+        "text/html",
+        "text/plain",
+        "application/pdf",
+    )  # Content types allowed for parsing.
+
     # Retry and per-URL timeout policy
     # services/ingestion.py
     retry_attempts: int = Field(default=3, ge=1)  # Max retry attempts per URL fetch.

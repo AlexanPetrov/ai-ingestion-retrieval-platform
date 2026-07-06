@@ -30,6 +30,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Per-host limiter wait metrics for outbound saturation visibility
 - Redis-backed inbound API rate limiting for ingestion routes
 - Rate-limit metrics for allowed, blocked, and storage-error decisions
+- Local parser boundary with text, HTML, and PDF extraction
 
 ## Stack
 
@@ -49,6 +50,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - respx
 - Redis
 - limits
+- pypdf
 
 ## Setup
 
@@ -106,6 +108,17 @@ curl -H "Authorization: Bearer <your-token>" http://127.0.0.1:8000/metrics
 ```bash
 uv run ruff format .
 uv run ruff check . --fix
+```
+
+## Local Redis
+
+```bash
+brew services start redis
+redis-cli ping
+redis-cli FLUSHDB
+redis-cli DBSIZE
+redis-cli --scan
+brew services stop redis
 ```
 
 ## Testing
