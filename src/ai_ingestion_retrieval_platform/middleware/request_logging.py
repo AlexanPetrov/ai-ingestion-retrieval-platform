@@ -13,6 +13,12 @@ from ai_ingestion_retrieval_platform.core.metrics import (
 
 logger = structlog.get_logger()
 
+HEALTH_CHECK_PATHS = {
+    "/health",
+    "/health/live",
+    "/health/ready",
+}
+
 
 class RequestLoggingMiddleware:
     def __init__(self, app: ASGIApp) -> None:
@@ -25,6 +31,7 @@ class RequestLoggingMiddleware:
 
         method = scope["method"]
         raw_path = scope["path"]
+        is_health_check = raw_path in HEALTH_CHECK_PATHS
         request_id = self._get_request_id(scope)
         start = perf_counter()
         status_code = 500
@@ -32,11 +39,12 @@ class RequestLoggingMiddleware:
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
 
-        logger.info(
-            "request_started",
-            method=method,
-            path=raw_path,
-        )
+        if not is_health_check:
+            logger.info(
+                "request_started",
+                method=method,
+                path=raw_path,
+            )
 
         async def send_wrapper(message: Message) -> None:
             nonlocal status_code
@@ -93,14 +101,15 @@ class RequestLoggingMiddleware:
             path=metric_path,
         ).observe(elapsed_seconds)
 
-        logger.info(
-            "request_completed",
-            method=method,
-            path=metric_path,
-            raw_path=raw_path,
-            status_code=status_code,
-            elapsed_ms=elapsed_ms,
-        )
+        if not is_health_check or status_code >= 400:
+            logger.info(
+                "request_completed",
+                method=method,
+                path=metric_path,
+                raw_path=raw_path,
+                status_code=status_code,
+                elapsed_ms=elapsed_ms,
+            )
 
     def _get_request_id(self, scope: Scope) -> str:
         headers = dict(scope.get("headers", []))

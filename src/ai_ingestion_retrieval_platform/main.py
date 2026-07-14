@@ -6,6 +6,10 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from ai_ingestion_retrieval_platform.api.dependencies.rate_limit import (
+    close_rate_limiter,
+    initialize_rate_limiter,
+)
 from ai_ingestion_retrieval_platform.api.routes.health import router as health_router
 from ai_ingestion_retrieval_platform.api.routes.ingestion import (
     router as ingestion_router,
@@ -45,9 +49,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             follow_redirects=False,
         ) as client:
             app.state.http_client = client
-            yield
 
-        app.state.http_client = None
+            try:
+                initialize_rate_limiter(app, settings)
+                yield
+            finally:
+                app.state.http_client = None
+                await close_rate_limiter(app)
 
     app = FastAPI(
         title=settings.app_name,

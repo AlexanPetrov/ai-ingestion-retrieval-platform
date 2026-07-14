@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import ceil
 from time import time
 
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from limits import RateLimitItemPerSecond
 from limits.aio.strategies import MovingWindowRateLimiter
 from limits.storage import storage_from_string
@@ -50,6 +50,21 @@ def _get_client_key(request: Request) -> str:
     return request.client.host
 
 
+def _create_rate_limiter(
+    app: FastAPI,
+    storage_url: str,
+) -> MovingWindowRateLimiter:
+    """Create and store the shared application rate limiter."""
+    storage = storage_from_string(storage_url)
+    limiter = MovingWindowRateLimiter(storage)
+
+    app.state.rate_limiter = limiter
+    app.state.rate_limiter_storage = storage
+    app.state.rate_limiter_storage_url = storage_url
+
+    return limiter
+
+
 def _get_rate_limiter(
     request: Request,
     settings: Settings,
@@ -62,14 +77,47 @@ def _get_rate_limiter(
     if isinstance(limiter, MovingWindowRateLimiter) and cached_url == storage_url:
         return limiter
 
-    storage = storage_from_string(storage_url)
-    limiter = MovingWindowRateLimiter(storage)
+    return _create_rate_limiter(request.app, storage_url)
 
-    request.app.state.rate_limiter = limiter
-    request.app.state.rate_limiter_storage = storage
-    request.app.state.rate_limiter_storage_url = storage_url
 
-    return limiter
+def initialize_rate_limiter(
+    app: FastAPI,
+    settings: Settings,
+) -> None:
+    """Initialize shared rate-limit storage during application startup."""
+    app.state.rate_limiter = None
+    app.state.rate_limiter_storage = None
+    app.state.rate_limiter_storage_url = None
+
+    if not settings.rate_limit_enabled:
+        return
+
+    storage_url = _to_async_redis_url(settings.rate_limit_redis_url)
+    _create_rate_limiter(app, storage_url)
+
+
+async def close_rate_limiter(app: FastAPI) -> None:
+    """Clear shared rate-limiter references during application shutdown."""
+    app.state.rate_limiter = None
+    app.state.rate_limiter_storage = None
+    app.state.rate_limiter_storage_url = None
+
+
+async def is_rate_limit_storage_ready(request: Request) -> bool:
+    """Return whether required rate-limit storage is available."""
+    settings = _get_settings(request)
+
+    if not settings.rate_limit_enabled:
+        return True
+
+    if settings.rate_limit_fail_open:
+        return True
+
+    try:
+        limiter = _get_rate_limiter(request, settings)
+        return bool(await limiter.storage.check())
+    except Exception:
+        return False
 
 
 async def _get_retry_after_seconds(

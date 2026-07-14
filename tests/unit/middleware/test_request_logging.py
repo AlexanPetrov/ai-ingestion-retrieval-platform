@@ -33,6 +33,18 @@ class _FakeHistogram:
         self.observe_calls.append((dict(self._current_labels), value))
 
 
+class _FakeLogger:
+    def __init__(self) -> None:
+        self.info_calls: list[tuple[str, dict[str, object]]] = []
+        self.exception_calls: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, **fields: object) -> None:
+        self.info_calls.append((event, fields))
+
+    def exception(self, event: str, **fields: object) -> None:
+        self.exception_calls.append((event, fields))
+
+
 async def _receive() -> dict[str, object]:
     return {
         "type": "http.request",
@@ -264,3 +276,101 @@ async def test_middleware_passthrough_for_non_http_scope(
     assert sent_messages == [{"type": "lifespan.startup.complete"}]
     assert fake_counter.inc_calls == []
     assert fake_histogram.observe_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/health",
+        "/health/live",
+        "/health/ready",
+    ],
+)
+async def test_middleware_suppresses_success_logs_for_health_routes(
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(middleware_module, "logger", fake_logger)
+
+    async def app(_scope: dict[str, object], _receive: object, send: object) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"ok",
+                "more_body": False,
+            }
+        )
+
+    middleware = middleware_module.RequestLoggingMiddleware(app)
+
+    async def send(_message: dict[str, object]) -> None:
+        return
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "headers": [],
+    }
+
+    await middleware(scope, _receive, send)
+
+    assert fake_logger.info_calls == []
+    assert fake_logger.exception_calls == []
+
+
+@pytest.mark.asyncio
+async def test_middleware_logs_failed_readiness_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(middleware_module, "logger", fake_logger)
+
+    async def app(_scope: dict[str, object], _receive: object, send: object) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            }
+        )
+
+    middleware = middleware_module.RequestLoggingMiddleware(app)
+
+    async def send(_message: dict[str, object]) -> None:
+        return
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/health/ready",
+        "headers": [],
+    }
+
+    await middleware(scope, _receive, send)
+
+    assert len(fake_logger.info_calls) == 1
+
+    event, fields = fake_logger.info_calls[0]
+
+    assert event == "request_completed"
+    assert fields["method"] == "GET"
+    assert fields["path"] == "/health/ready"
+    assert fields["status_code"] == 503
+    assert fake_logger.exception_calls == []

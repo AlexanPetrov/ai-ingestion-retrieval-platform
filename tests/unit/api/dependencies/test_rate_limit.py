@@ -10,6 +10,8 @@ from ai_ingestion_retrieval_platform.api.dependencies import (
 from ai_ingestion_retrieval_platform.api.dependencies.rate_limit import (
     RateLimitPolicy,
     enforce_rate_limit,
+    initialize_rate_limiter,
+    is_rate_limit_storage_ready,
 )
 from ai_ingestion_retrieval_platform.core.config import Settings
 
@@ -219,3 +221,62 @@ async def test_rate_limit_can_fail_open_when_storage_is_unavailable(
     assert fake_storage_error_counter.inc_calls == [
         {"policy": "test-limit"},
     ]
+
+
+def test_initialize_rate_limiter_skips_storage_when_disabled() -> None:
+    app = FastAPI()
+    settings = Settings(rate_limit_enabled=False)
+
+    initialize_rate_limiter(app, settings)
+
+    assert app.state.rate_limiter is None
+    assert app.state.rate_limiter_storage is None
+    assert app.state.rate_limiter_storage_url is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_storage_is_ready_when_rate_limiting_is_disabled() -> None:
+    app = FastAPI()
+    app.state.settings = Settings(rate_limit_enabled=False)
+    request = _build_request(app)
+
+    assert await is_rate_limit_storage_ready(request) is True
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_storage_is_ready_when_fail_open_is_enabled() -> None:
+    app = FastAPI()
+    app.state.settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_fail_open=True,
+        rate_limit_redis_url="unknown://localhost",
+    )
+    request = _build_request(app)
+
+    assert await is_rate_limit_storage_ready(request) is True
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_storage_is_ready_when_storage_is_available() -> None:
+    app = FastAPI()
+    app.state.settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_fail_open=False,
+        rate_limit_redis_url="async+memory://",
+    )
+    request = _build_request(app)
+
+    assert await is_rate_limit_storage_ready(request) is True
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_storage_is_not_ready_when_required_storage_fails() -> None:
+    app = FastAPI()
+    app.state.settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_fail_open=False,
+        rate_limit_redis_url="unknown://localhost",
+    )
+    request = _build_request(app)
+
+    assert await is_rate_limit_storage_ready(request) is False
