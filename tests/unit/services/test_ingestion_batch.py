@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionPreview,
     UrlParsedIngestionPreview,
@@ -44,6 +45,7 @@ async def test_preview_urls_preserves_input_order_and_partial_failures(
         url: str,
         _client: object,
         url_timeout: float | None = None,
+        app_settings: Settings | None = None,
     ) -> UrlIngestionPreview:
         if "bad" in url:
             raise HTTPException(
@@ -87,6 +89,7 @@ async def test_preview_urls_respects_max_concurrency_bound(
         url: str,
         _client: object,
         url_timeout: float | None = None,
+        app_settings: Settings | None = None,
     ) -> UrlIngestionPreview:
         nonlocal in_flight, peak_in_flight
         async with lock:
@@ -122,6 +125,7 @@ async def test_preview_parsed_urls_preserves_input_order_and_partial_failures(
         url: str,
         _client: object,
         url_timeout: float | None = None,
+        app_settings: Settings | None = None,
     ) -> UrlParsedIngestionPreview:
         if "bad" in url:
             raise HTTPException(
@@ -169,6 +173,7 @@ async def test_preview_parsed_urls_respects_max_concurrency_bound(
         url: str,
         _client: object,
         url_timeout: float | None = None,
+        app_settings: Settings | None = None,
     ) -> UrlParsedIngestionPreview:
         nonlocal in_flight, peak_in_flight
         async with lock:

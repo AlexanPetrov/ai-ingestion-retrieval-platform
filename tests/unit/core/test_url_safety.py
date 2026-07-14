@@ -5,7 +5,7 @@ import socket
 import pytest
 from fastapi import HTTPException
 
-from ai_ingestion_retrieval_platform.core.config import get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 
 
@@ -30,7 +30,8 @@ async def test_validate_url_is_safe_allows_public_http_https(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    result = await validate_url_is_safe(url)
+    result = await validate_url_is_safe(url, Settings())
+
     assert result.hostname == "example.com"
     assert result.resolved_ip == "93.184.216.34"
     assert result.host_header == "example.com"
@@ -55,7 +56,7 @@ async def test_validate_url_is_safe_rejects_invalid_or_internal_targets(
     expected_detail: str,
 ) -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await validate_url_is_safe(url)
+        await validate_url_is_safe(url, Settings())
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == expected_detail
@@ -64,7 +65,10 @@ async def test_validate_url_is_safe_rejects_invalid_or_internal_targets(
 @pytest.mark.asyncio
 async def test_validate_url_is_safe_rejects_url_credentials() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await validate_url_is_safe("https://user:pass@example.com")
+        await validate_url_is_safe(
+            "https://user:pass@example.com",
+            Settings(),
+        )
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == "URL credentials are not allowed"
@@ -73,7 +77,10 @@ async def test_validate_url_is_safe_rejects_url_credentials() -> None:
 @pytest.mark.asyncio
 async def test_validate_url_is_safe_rejects_non_allowed_port() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await validate_url_is_safe("https://public-domain.test:8443/path")
+        await validate_url_is_safe(
+            "https://public-domain.test:8443/path",
+            Settings(),
+        )
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == "URL port is not allowed"
@@ -89,7 +96,10 @@ async def test_validate_url_is_safe_rejects_unresolvable_hostname(
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
     with pytest.raises(HTTPException) as exc_info:
-        await validate_url_is_safe("https://does-not-resolve.test")
+        await validate_url_is_safe(
+            "https://does-not-resolve.test",
+            Settings(),
+        )
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == "URL hostname could not be resolved"
@@ -110,7 +120,10 @@ async def test_validate_url_is_safe_rejects_hostname_resolving_to_private_ip(
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
     with pytest.raises(HTTPException) as exc_info:
-        await validate_url_is_safe("https://public-looking-domain.test")
+        await validate_url_is_safe(
+            "https://public-looking-domain.test",
+            Settings(),
+        )
 
     assert exc_info.value.status_code == 400
     assert str(exc_info.value.detail) == "URL resolves to a private/internal IP"
@@ -129,7 +142,11 @@ async def test_validate_url_is_safe_allows_hostname_resolving_to_public_ip(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    result = await validate_url_is_safe("https://public-domain.test")
+    result = await validate_url_is_safe(
+        "https://public-domain.test",
+        Settings(),
+    )
+
     assert result.hostname == "public-domain.test"
     assert result.resolved_ip == "93.184.216.34"
     assert result.host_header == "public-domain.test"
@@ -147,9 +164,13 @@ async def test_validate_url_is_safe_allows_configured_non_default_port(
         return fake_addresses
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr(get_settings(), "allowed_fetch_ports", (80, 443, 8443))
 
-    result = await validate_url_is_safe("https://public-domain.test:8443/path")
+    settings = Settings(allowed_fetch_ports=(80, 443, 8443))
+
+    result = await validate_url_is_safe(
+        "https://public-domain.test:8443/path",
+        settings,
+    )
 
     assert result.hostname == "public-domain.test"
     assert result.resolved_ip == "93.184.216.34"

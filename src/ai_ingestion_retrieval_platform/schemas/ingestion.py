@@ -2,10 +2,6 @@
 
 from pydantic import AnyHttpUrl, BaseModel, Field
 
-from ai_ingestion_retrieval_platform.core.config import get_settings
-
-settings = get_settings()
-
 
 class UrlIngestionRequest(BaseModel):
     url: AnyHttpUrl = Field(
@@ -15,20 +11,18 @@ class UrlIngestionRequest(BaseModel):
 
 
 class BatchUrlIngestionRequest(BaseModel):
-    # Future note: these schema limits are loaded at import time.
-    # Move validation into route/dependency logic if per-app dynamic
-    # settings are needed.
     urls: list[AnyHttpUrl] = Field(
         min_length=1,
-        max_length=settings.max_batch_urls,
         examples=[["https://example.com", "https://httpbin.org/html"]],
         description="Public URLs to fetch for ingestion preview.",
     )
-    max_concurrency: int = Field(
-        default=settings.default_max_concurrency,
+    max_concurrency: int | None = Field(
+        default=None,
         ge=1,
-        le=settings.max_allowed_concurrency,
-        description="Maximum number of URLs fetched at the same time.",
+        description=(
+            "Maximum number of URLs fetched at the same time. "
+            "Uses the application default when omitted."
+        ),
     )
 
 

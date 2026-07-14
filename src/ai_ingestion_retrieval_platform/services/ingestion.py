@@ -13,12 +13,10 @@ from tenacity import (
     RetryCallState,
     retry,
     retry_if_exception,
-    stop_after_attempt,
-    stop_after_delay,
     wait_exponential_jitter,
 )
 
-from ai_ingestion_retrieval_platform.core.config import get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.limits import (
     create_batch_limiter,
     get_host_limiter,
@@ -48,12 +46,6 @@ from ai_ingestion_retrieval_platform.schemas.parsing import ParseRequest
 from ai_ingestion_retrieval_platform.services.parsing import parse_document
 
 logger = structlog.get_logger()
-settings = get_settings()
-
-DEFAULT_RETRY_WAIT = wait_exponential_jitter(
-    initial=settings.retry_backoff_initial_seconds,
-    max=settings.retry_backoff_max_seconds,
-)
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 RETRY_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
@@ -62,6 +54,49 @@ ERROR_TOO_MANY_REDIRECTS = "Too many redirects"
 ERROR_REDIRECT_MISSING_LOCATION = "Redirect response missing Location header"
 ERROR_TIMEOUT = "URL fetch timed out"
 ERROR_FETCH_FAILED = "URL fetch failed"
+
+
+def _resolve_settings(app_settings: Settings | None) -> Settings:
+    """Return explicitly provided app settings or freshly loaded defaults."""
+    if app_settings is not None:
+        return app_settings
+
+    return Settings()
+
+
+def _get_retry_settings(retry_state: RetryCallState) -> Settings:
+    """Return the settings associated with the current retry call."""
+    app_settings = getattr(retry_state, "kwargs", {}).get("app_settings")
+
+    if isinstance(app_settings, Settings):
+        return app_settings
+
+    args = getattr(retry_state, "args", ())
+    if len(args) >= 6 and isinstance(args[5], Settings):
+        return args[5]
+
+    return Settings()
+
+
+def get_default_retry_wait_seconds(retry_state: RetryCallState) -> float:
+    """Return jittered exponential backoff using the current call settings."""
+    runtime_settings = _get_retry_settings(retry_state)
+    wait_strategy = wait_exponential_jitter(
+        initial=runtime_settings.retry_backoff_initial_seconds,
+        max=runtime_settings.retry_backoff_max_seconds,
+    )
+    return wait_strategy(retry_state)
+
+
+def should_stop_retry(retry_state: RetryCallState) -> bool:
+    """Stop when the current call reaches its attempt or time budget."""
+    runtime_settings = _get_retry_settings(retry_state)
+    elapsed_seconds = retry_state.seconds_since_start or 0.0
+
+    return (
+        retry_state.attempt_number >= runtime_settings.retry_attempts
+        or elapsed_seconds >= runtime_settings.retry_total_timeout_seconds
+    )
 
 
 def is_retry_safe_method(method: str | None) -> bool:
@@ -82,6 +117,7 @@ def get_exception_request_method(exc: BaseException) -> str | None:
 
 
 def on_retry_before_sleep(retry_state: RetryCallState) -> None:
+    runtime_settings = _get_retry_settings(retry_state)
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     error_type = type(exception).__name__ if exception else "unknown"
 
@@ -98,7 +134,7 @@ def on_retry_before_sleep(retry_state: RetryCallState) -> None:
         url=url,
         error_type=error_type,
         attempt_number=retry_state.attempt_number,
-        max_attempts=settings.retry_attempts,
+        max_attempts=runtime_settings.retry_attempts,
         sleep_seconds=sleep_seconds,
     )
 
@@ -147,6 +183,7 @@ def get_retry_after_seconds(retry_after_header: str) -> float | None:
 
 
 def get_retry_wait_seconds(retry_state: RetryCallState) -> float:
+    runtime_settings = _get_retry_settings(retry_state)
     exception = retry_state.outcome.exception() if retry_state.outcome else None
 
     if isinstance(exception, httpx.HTTPStatusError):
@@ -160,10 +197,10 @@ def get_retry_wait_seconds(retry_state: RetryCallState) -> float:
                 if retry_after_seconds is not None:
                     return min(
                         retry_after_seconds,
-                        settings.retry_backoff_max_seconds,
+                        runtime_settings.retry_backoff_max_seconds,
                     )
 
-    return DEFAULT_RETRY_WAIT(retry_state)
+    return get_default_retry_wait_seconds(retry_state)
 
 
 def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
@@ -262,8 +299,7 @@ def build_ingestion_error(exc: HTTPException) -> UrlIngestionError:
 
 @retry(
     retry=retry_if_exception(is_retryable_exception),
-    stop=stop_after_attempt(settings.retry_attempts)
-    | stop_after_delay(settings.retry_total_timeout_seconds),
+    stop=should_stop_retry,
     wait=get_retry_wait_seconds,
     before_sleep=on_retry_before_sleep,
     reraise=True,
@@ -274,12 +310,14 @@ async def fetch_url(
     method: str = "GET",
     url_timeout: float | None = None,
     max_bytes: int | None = None,
+    app_settings: Settings | None = None,
 ) -> httpx.Response:
+    runtime_settings = _resolve_settings(app_settings)
     timeout_seconds = (
-        settings.url_timeout_seconds if url_timeout is None else url_timeout
+        runtime_settings.url_timeout_seconds if url_timeout is None else url_timeout
     )
-    byte_limit = settings.max_preview_bytes if max_bytes is None else max_bytes
-    outbound_fetch_limiter = get_outbound_fetch_limiter(settings)
+    byte_limit = runtime_settings.max_preview_bytes if max_bytes is None else max_bytes
+    outbound_fetch_limiter = get_outbound_fetch_limiter(runtime_settings)
 
     wait_start = perf_counter()
     await outbound_fetch_limiter.acquire()
@@ -290,9 +328,9 @@ async def fetch_url(
         async with asyncio.timeout(timeout_seconds):
             current_url = httpx.URL(url)
 
-            for _ in range(settings.max_redirects + 1):
-                target = await validate_url_is_safe(str(current_url))
-                host_limiter = await get_host_limiter(target.hostname, settings)
+            for _ in range(runtime_settings.max_redirects + 1):
+                target = await validate_url_is_safe(str(current_url), runtime_settings)
+                host_limiter = await get_host_limiter(target.hostname, runtime_settings)
 
                 pinned_url = current_url.copy_with(host=target.resolved_ip)
 
@@ -361,14 +399,21 @@ async def preview_url(
     url: AnyHttpUrl,
     client: httpx.AsyncClient,
     url_timeout: float | None = None,
+    app_settings: Settings | None = None,
 ) -> UrlIngestionPreview:
+    runtime_settings = _resolve_settings(app_settings)
     start = perf_counter()
     url_str = str(url)
 
     logger.info("url_preview_started", url=url_str)
 
     try:
-        response = await fetch_url(client, url_str, url_timeout=url_timeout)
+        response = await fetch_url(
+            client,
+            url_str,
+            url_timeout=url_timeout,
+            app_settings=runtime_settings,
+        )
 
     except HTTPException:
         INGESTION_URL_PREVIEW_TOTAL.labels(result="failure").inc()
@@ -459,7 +504,7 @@ async def preview_url(
         content_type=response.headers.get("content-type"),
         content_length=len(response.content),
         elapsed_ms=elapsed_ms,
-        preview=response.text[: settings.max_preview_text_chars],
+        preview=response.text[: runtime_settings.max_preview_text_chars],
     )
 
 
@@ -467,7 +512,9 @@ async def preview_parsed_url(
     url: AnyHttpUrl,
     client: httpx.AsyncClient,
     url_timeout: float | None = None,
+    app_settings: Settings | None = None,
 ) -> UrlParsedIngestionPreview:
+    runtime_settings = _resolve_settings(app_settings)
     start = perf_counter()
     url_str = str(url)
 
@@ -478,7 +525,8 @@ async def preview_parsed_url(
             client,
             url_str,
             url_timeout=url_timeout,
-            max_bytes=settings.max_parse_bytes,
+            max_bytes=runtime_settings.max_parse_bytes,
+            app_settings=runtime_settings,
         )
 
         parsed = await parse_document(
@@ -488,7 +536,7 @@ async def preview_parsed_url(
                 or "application/octet-stream",
                 source_url=url_str,
             ),
-            settings=settings,
+            settings=runtime_settings,
         )
 
     except HTTPException:
@@ -583,7 +631,7 @@ async def preview_parsed_url(
         elapsed_ms=elapsed_ms,
         parsed_content_type=parsed.content_type,
         parsed_char_length=parsed.char_length,
-        parsed_preview=parsed.text[: settings.max_preview_text_chars],
+        parsed_preview=parsed.text[: runtime_settings.max_preview_text_chars],
     )
 
 
@@ -591,7 +639,10 @@ async def preview_urls(
     urls: list[AnyHttpUrl],
     max_concurrency: int,
     client: httpx.AsyncClient,
+    app_settings: Settings | None = None,
 ) -> list[UrlIngestionBatchResult]:
+    runtime_settings = _resolve_settings(app_settings)
+
     logger.info(
         "batch_preview_started",
         url_count=len(urls),
@@ -612,7 +663,8 @@ async def preview_urls(
                 preview = await preview_url(
                     url,
                     client,
-                    url_timeout=settings.url_timeout_seconds,
+                    url_timeout=runtime_settings.url_timeout_seconds,
+                    app_settings=runtime_settings,
                 )
 
                 return UrlIngestionBatchResult(
@@ -663,7 +715,10 @@ async def preview_parsed_urls(
     urls: list[AnyHttpUrl],
     max_concurrency: int,
     client: httpx.AsyncClient,
+    app_settings: Settings | None = None,
 ) -> list[UrlParsedIngestionBatchResult]:
+    runtime_settings = _resolve_settings(app_settings)
+
     logger.info(
         "batch_parse_preview_started",
         url_count=len(urls),
@@ -686,7 +741,8 @@ async def preview_parsed_urls(
                 preview = await preview_parsed_url(
                     url,
                     client,
-                    url_timeout=settings.url_timeout_seconds,
+                    url_timeout=runtime_settings.url_timeout_seconds,
+                    app_settings=runtime_settings,
                 )
 
                 return UrlParsedIngestionBatchResult(

@@ -12,7 +12,7 @@ Per-host limiter controls how many fetches hit the same hostname at once.
 import asyncio
 from weakref import WeakKeyDictionary
 
-from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 
 _outbound_fetch_limiters: WeakKeyDictionary[
     asyncio.AbstractEventLoop,
@@ -31,10 +31,10 @@ _host_limiter_locks: WeakKeyDictionary[
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
-    if settings is None:
-        return get_settings()
+    if settings is not None:
+        return settings
 
-    return settings
+    return Settings()
 
 
 def get_outbound_fetch_limiter(settings: Settings | None = None) -> asyncio.Semaphore:

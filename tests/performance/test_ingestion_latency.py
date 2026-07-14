@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.schemas.ingestion import UrlIngestionPreview
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
 
@@ -38,6 +39,7 @@ async def test_batch_latency_is_dominated_by_slow_outlier(
         url: str,
         _client: object,
         url_timeout: float | None = None,
+        app_settings: Settings | None = None,
     ) -> UrlIngestionPreview:
         if "slow" in url:
             await asyncio.sleep(slow_sleep_seconds)

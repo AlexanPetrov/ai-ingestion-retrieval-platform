@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-from ai_ingestion_retrieval_platform.core.config import get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 
 BLOCKED_HOSTNAMES = {"localhost"}
 BLOCKED_IPS = {
@@ -73,8 +73,10 @@ def _get_validated_port(
     return resolved_port
 
 
-async def validate_url_is_safe(url: str) -> SafeFetchTarget:
-    settings = get_settings()
+async def validate_url_is_safe(
+    url: str,
+    settings: Settings,
+) -> SafeFetchTarget:
     parsed = urlparse(url)
 
     if parsed.scheme not in {"http", "https"}:

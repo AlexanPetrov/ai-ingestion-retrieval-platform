@@ -23,7 +23,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Structured JSON logs with request correlation IDs
 - Protected Prometheus metrics endpoint disabled by default
 - ASGI request logging middleware with latency and error metrics
-- Config-driven runtime settings and validated request bounds
+- Application-scoped runtime settings with validated per-app request and service limits
 - Allowed outbound fetch ports to reduce SSRF/network probing risk
 - URL credential rejection for safer outbound ingestion
 - Normalized request metric paths to avoid high-cardinality Prometheus labels
@@ -147,7 +147,8 @@ Current focus:
 - Secure and resilient URL preview and parsed-preview ingestion (complete for current preview scope)
 - Observability and test baseline (complete for current scope)
 - Operational liveness, readiness, and shared-resource lifecycle hardening (complete)
-- Transition to persistence/indexing/retrieval work (next)
+- Response admission validation and remaining platform hardening (next)
+- Persistence, indexing, and retrieval (planned)
 
 Next phase:
 

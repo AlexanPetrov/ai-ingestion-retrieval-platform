@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from ai_ingestion_retrieval_platform.api.routes import ingestion as ingestion_routes
-from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.main import create_app
 
 
@@ -12,12 +12,16 @@ from ai_ingestion_retrieval_platform.main import create_app
 async def test_url_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+    settings = Settings(rate_limit_enabled=False)
+    app = create_app(settings)
 
     async def fake_preview_url(
         url: object,
         _client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> dict[str, object]:
+        assert app_settings is settings
+
         url_str = str(url)
         return {
             "url": url_str,
@@ -61,12 +65,16 @@ async def test_url_preview_route_returns_expected_contract(
 async def test_url_parse_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+    settings = Settings(rate_limit_enabled=False)
+    app = create_app(settings)
 
     async def fake_preview_parsed_url(
         url: object,
         _client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> dict[str, object]:
+        assert app_settings is settings
+
         url_str = str(url)
         return {
             "url": url_str,
@@ -115,21 +123,29 @@ async def test_url_parse_preview_route_returns_expected_contract(
 
 
 @pytest.mark.asyncio
-async def test_urls_preview_route_forwards_urls_and_default_concurrency(
+async def test_urls_preview_route_forwards_urls_and_app_default_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+    settings = Settings(
+        rate_limit_enabled=False,
+        default_max_concurrency=4,
+    )
+    app = create_app(settings)
     captured: dict[str, object] = {}
 
     async def fake_preview_urls(
         urls: list[object],
         max_concurrency: int,
         client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> list[dict[str, object]]:
         assert isinstance(client, httpx.AsyncClient)
+
         normalized_urls = [str(url) for url in urls]
         captured["urls"] = normalized_urls
         captured["max_concurrency"] = max_concurrency
+        captured["app_settings"] = app_settings
+
         return [
             {
                 "url": normalized_urls[0],
@@ -167,25 +183,34 @@ async def test_urls_preview_route_forwards_urls_and_default_concurrency(
     assert response.status_code == 200
     assert len(response.json()) == 1
     assert captured["urls"] == ["https://example.com/"]
-    assert captured["max_concurrency"] == get_settings().default_max_concurrency
+    assert captured["max_concurrency"] == settings.default_max_concurrency
+    assert captured["app_settings"] is settings
 
 
 @pytest.mark.asyncio
-async def test_urls_parse_preview_route_forwards_urls_and_default_concurrency(
+async def test_urls_parse_preview_route_forwards_urls_and_app_default_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+    settings = Settings(
+        rate_limit_enabled=False,
+        default_max_concurrency=4,
+    )
+    app = create_app(settings)
     captured: dict[str, object] = {}
 
     async def fake_preview_parsed_urls(
         urls: list[object],
         max_concurrency: int,
         client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> list[dict[str, object]]:
         assert isinstance(client, httpx.AsyncClient)
+
         normalized_urls = [str(url) for url in urls]
         captured["urls"] = normalized_urls
         captured["max_concurrency"] = max_concurrency
+        captured["app_settings"] = app_settings
+
         return [
             {
                 "url": normalized_urls[0],
@@ -232,7 +257,8 @@ async def test_urls_parse_preview_route_forwards_urls_and_default_concurrency(
     assert response.status_code == 200
     assert len(response.json()) == 1
     assert captured["urls"] == ["https://example.com/"]
-    assert captured["max_concurrency"] == get_settings().default_max_concurrency
+    assert captured["max_concurrency"] == settings.default_max_concurrency
+    assert captured["app_settings"] is settings
 
 
 @pytest.mark.asyncio
@@ -258,12 +284,16 @@ async def test_url_preview_route_rejects_invalid_url() -> None:
 
 
 @pytest.mark.asyncio
-async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+async def test_urls_preview_route_rejects_app_specific_concurrency_limit() -> None:
+    settings = Settings(
+        rate_limit_enabled=False,
+        max_allowed_concurrency=2,
+    )
+    app = create_app(settings)
 
     payload = {
         "urls": ["https://example.com"],
-        "max_concurrency": get_settings().max_allowed_concurrency + 1,
+        "max_concurrency": settings.max_allowed_concurrency + 1,
     }
 
     async with httpx.AsyncClient() as shared_client:
@@ -279,25 +309,63 @@ async def test_urls_preview_route_rejects_concurrency_above_limit() -> None:
     app.state.http_client = None
 
     assert response.status_code == 422
+    assert response.json() == {
+        "detail": (f"max_concurrency cannot exceed {settings.max_allowed_concurrency}")
+    }
+
+
+@pytest.mark.asyncio
+async def test_urls_preview_route_rejects_app_specific_batch_limit() -> None:
+    settings = Settings(
+        rate_limit_enabled=False,
+        max_batch_urls=1,
+    )
+    app = create_app(settings)
+
+    payload = {
+        "urls": [
+            "https://example.com/one",
+            "https://example.com/two",
+        ],
+    }
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/ingestion/urls/preview", json=payload)
+
+    app.state.http_client = None
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": f"Batch cannot contain more than {settings.max_batch_urls} URLs"
+    }
 
 
 @pytest.mark.asyncio
 async def test_url_preview_route_returns_429_when_rate_limited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(
-        Settings(
-            rate_limit_enabled=True,
-            rate_limit_redis_url="async+memory://",
-            rate_limit_url_preview_requests=1,
-            rate_limit_url_preview_window_seconds=60,
-        )
+    settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_redis_url="async+memory://",
+        rate_limit_url_preview_requests=1,
+        rate_limit_url_preview_window_seconds=60,
     )
+    app = create_app(settings)
 
     async def fake_preview_url(
         url: object,
         _client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> dict[str, object]:
+        assert app_settings is settings
+
         url_str = str(url)
         return {
             "url": url_str,
@@ -339,21 +407,23 @@ async def test_url_preview_route_returns_429_when_rate_limited(
 async def test_urls_preview_route_returns_429_when_rate_limited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(
-        Settings(
-            rate_limit_enabled=True,
-            rate_limit_redis_url="async+memory://",
-            rate_limit_batch_preview_requests=1,
-            rate_limit_batch_preview_window_seconds=60,
-        )
+    settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_redis_url="async+memory://",
+        rate_limit_batch_preview_requests=1,
+        rate_limit_batch_preview_window_seconds=60,
     )
+    app = create_app(settings)
 
     async def fake_preview_urls(
         urls: list[object],
         max_concurrency: int,
         client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> list[dict[str, object]]:
         assert isinstance(client, httpx.AsyncClient)
+        assert app_settings is settings
+
         normalized_urls = [str(url) for url in urls]
         return [
             {
@@ -400,21 +470,23 @@ async def test_urls_preview_route_returns_429_when_rate_limited(
 async def test_urls_parse_preview_route_returns_429_when_rate_limited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(
-        Settings(
-            rate_limit_enabled=True,
-            rate_limit_redis_url="async+memory://",
-            rate_limit_batch_preview_requests=1,
-            rate_limit_batch_preview_window_seconds=60,
-        )
+    settings = Settings(
+        rate_limit_enabled=True,
+        rate_limit_redis_url="async+memory://",
+        rate_limit_batch_preview_requests=1,
+        rate_limit_batch_preview_window_seconds=60,
     )
+    app = create_app(settings)
 
     async def fake_preview_parsed_urls(
         urls: list[object],
         max_concurrency: int,
         client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
     ) -> list[dict[str, object]]:
         assert isinstance(client, httpx.AsyncClient)
+        assert app_settings is settings
+
         normalized_urls = [str(url) for url in urls]
         return [
             {

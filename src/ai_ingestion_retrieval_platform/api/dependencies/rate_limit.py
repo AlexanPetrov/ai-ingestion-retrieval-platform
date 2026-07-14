@@ -9,7 +9,10 @@ from limits import RateLimitItemPerSecond
 from limits.aio.strategies import MovingWindowRateLimiter
 from limits.storage import storage_from_string
 
-from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
+from ai_ingestion_retrieval_platform.api.dependencies.settings import (
+    get_app_settings,
+)
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.metrics import (
     INBOUND_RATE_LIMIT_STORAGE_ERROR_TOTAL,
     INBOUND_RATE_LIMIT_TOTAL,
@@ -21,15 +24,6 @@ class RateLimitPolicy:
     name: str
     requests: int
     window_seconds: int
-
-
-def _get_settings(request: Request) -> Settings:
-    settings = getattr(request.app.state, "settings", None)
-
-    if isinstance(settings, Settings):
-        return settings
-
-    return get_settings()
 
 
 def _to_async_redis_url(redis_url: str) -> str:
@@ -105,7 +99,7 @@ async def close_rate_limiter(app: FastAPI) -> None:
 
 async def is_rate_limit_storage_ready(request: Request) -> bool:
     """Return whether required rate-limit storage is available."""
-    settings = _get_settings(request)
+    settings = get_app_settings(request)
 
     if not settings.rate_limit_enabled:
         return True
@@ -136,7 +130,7 @@ async def enforce_rate_limit(
     request: Request,
     policy: RateLimitPolicy,
 ) -> None:
-    settings = _get_settings(request)
+    settings = get_app_settings(request)
 
     if not settings.rate_limit_enabled:
         return
@@ -190,7 +184,7 @@ async def enforce_rate_limit(
 
 
 async def rate_limit_url_preview(request: Request) -> None:
-    settings = _get_settings(request)
+    settings = get_app_settings(request)
 
     await enforce_rate_limit(
         request=request,
@@ -203,7 +197,7 @@ async def rate_limit_url_preview(request: Request) -> None:
 
 
 async def rate_limit_batch_preview(request: Request) -> None:
-    settings = _get_settings(request)
+    settings = get_app_settings(request)
 
     await enforce_rate_limit(
         request=request,

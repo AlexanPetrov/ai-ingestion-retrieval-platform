@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from ai_ingestion_retrieval_platform.core.config import Settings, get_settings
+from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument, ParseRequest
 
 ERROR_PARSE_CONTENT_TOO_LARGE = "Document is too large to parse"
@@ -126,15 +126,14 @@ async def parse_document(
     request: ParseRequest,
     settings: Settings | None = None,
 ) -> ParsedDocument:
-    if settings is None:
-        settings = get_settings()
+    runtime_settings = settings if settings is not None else Settings()
 
     try:
-        async with asyncio.timeout(settings.parse_timeout_seconds):
+        async with asyncio.timeout(runtime_settings.parse_timeout_seconds):
             return await asyncio.to_thread(
                 _parse_document_sync,
                 request,
-                settings,
+                runtime_settings,
             )
 
     except TimeoutError as exc:
