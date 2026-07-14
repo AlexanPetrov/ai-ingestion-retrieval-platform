@@ -11,11 +11,11 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 
 ## Current Features
 
-- Async URL preview ingestion pipeline
+- Async raw and parsed URL preview ingestion pipeline
 - SSRF and DNS safety checks for outbound fetches
 - Redirect validation and response body size capping
 - Bounded concurrency with global and per-host outbound limiting
-- Shared async HTTP client via FastAPI lifespan and dependency injection
+- Shared HTTP client and rate-limiter resources managed through the FastAPI lifespan
 - Connection pooling, phase-specific HTTP timeouts, and per-URL timeout enforcement
 - Retry and backoff with 429 Retry-After support
 - Partial batch failure handling with typed error mapping
@@ -31,7 +31,10 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Redis-backed inbound API rate limiting for ingestion routes
 - Rate-limit metrics for allowed, blocked, and storage-error decisions
 - Local parser boundary with text, HTML, and PDF extraction
-- Parsed URL preview routes for single and batch ingestion previews
+- Raw and parsed URL preview routes for single and batch ingestion flows
+- Separate liveness and readiness health endpoints for operational checks
+- Readiness checks for the shared HTTP client and required Redis rate-limit storage
+- Health-probe log suppression while preserving request IDs, metrics, and failed readiness logs
 
 ## Stack
 
@@ -61,6 +64,11 @@ git clone https://github.com/apfb11/ai-ingestion-retrieval-platform.git
 cd ai-ingestion-retrieval-platform
 uv sync
 cp .env.example .env
+
+# Required when RATE_LIMIT_ENABLED=true
+brew services start redis
+redis-cli ping
+
 PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:create_app --factory --reload
 ```
 
@@ -136,8 +144,9 @@ Current implementation scope: ingestion verification and preview output, not ful
 Current focus:
 
 - Stage 1 FastAPI reliability hardening (complete)
-- Secure and resilient URL preview ingestion (complete for preview scope)
+- Secure and resilient URL preview and parsed-preview ingestion (complete for current preview scope)
 - Observability and test baseline (complete for current scope)
+- Operational liveness, readiness, and shared-resource lifecycle hardening (complete)
 - Transition to persistence/indexing/retrieval work (next)
 
 Next phase:
