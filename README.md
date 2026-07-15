@@ -36,6 +36,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Readiness checks for the shared HTTP client and required Redis rate-limit storage
 - Health-probe log suppression while preserving request IDs, metrics, and failed readiness logs
 - Optional Bearer authentication for all ingestion routes, with app-scoped configuration and Swagger/OpenAPI integration
+- Cross-setting configuration validation rejects contradictory limits and incomplete security configuration during application startup
 
 ## Stack
 
@@ -157,6 +158,7 @@ Current focus:
 - Response admission validation (complete)
 - Basic ingestion-route authentication (complete)
 - Remaining platform hardening (next)
+- Cross-setting configuration validation (complete)
 - Persistence, indexing, and retrieval (planned)
 
 Next phase:
