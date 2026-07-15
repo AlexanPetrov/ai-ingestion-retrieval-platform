@@ -13,7 +13,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 
 - Async raw and parsed URL preview ingestion pipeline
 - SSRF and DNS safety checks for outbound fetches
-- Redirect validation and response body size capping
+- Redirect validation; early Content-Length and parsed Content-Type admission checks; streaming response body caps
 - Bounded concurrency with global and per-host outbound limiting
 - Shared HTTP client and rate-limiter resources managed through the FastAPI lifespan
 - Connection pooling, phase-specific HTTP timeouts, and per-URL timeout enforcement
@@ -147,7 +147,8 @@ Current focus:
 - Secure and resilient URL preview and parsed-preview ingestion (complete for current preview scope)
 - Observability and test baseline (complete for current scope)
 - Operational liveness, readiness, and shared-resource lifecycle hardening (complete)
-- Response admission validation and remaining platform hardening (next)
+- Response admission validation (complete)
+- Remaining platform hardening (next)
 - Persistence, indexing, and retrieval (planned)
 
 Next phase:

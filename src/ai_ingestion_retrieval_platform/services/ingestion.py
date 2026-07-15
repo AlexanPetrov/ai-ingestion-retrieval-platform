@@ -34,6 +34,10 @@ from ai_ingestion_retrieval_platform.core.metrics import (
     INGESTION_URL_RETRY_TOTAL,
     INGESTION_URL_TIMEOUT_TOTAL,
 )
+from ai_ingestion_retrieval_platform.core.response_admission import (
+    validate_allowed_content_type,
+    validate_declared_content_length,
+)
 from ai_ingestion_retrieval_platform.core.url_safety import validate_url_is_safe
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionBatchResult,
@@ -310,6 +314,7 @@ async def fetch_url(
     method: str = "GET",
     url_timeout: float | None = None,
     max_bytes: int | None = None,
+    allowed_content_types: tuple[str, ...] | None = None,
     app_settings: Settings | None = None,
 ) -> httpx.Response:
     runtime_settings = _resolve_settings(app_settings)
@@ -366,6 +371,17 @@ async def fetch_url(
                             continue
 
                         response.raise_for_status()
+
+                        validate_declared_content_length(
+                            response.headers.get("content-length"),
+                            byte_limit,
+                        )
+
+                        if allowed_content_types is not None:
+                            validate_allowed_content_type(
+                                response.headers.get("content-type"),
+                                allowed_content_types,
+                            )
 
                         body = bytearray()
 
@@ -526,6 +542,7 @@ async def preview_parsed_url(
             url_str,
             url_timeout=url_timeout,
             max_bytes=runtime_settings.max_parse_bytes,
+            allowed_content_types=runtime_settings.allowed_parse_content_types,
             app_settings=runtime_settings,
         )
 

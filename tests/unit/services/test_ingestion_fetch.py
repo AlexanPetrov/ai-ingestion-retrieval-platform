@@ -10,6 +10,11 @@ from tenacity import stop_after_attempt, wait_none
 
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.limits import clear_limiters
+from ai_ingestion_retrieval_platform.core.response_admission import (
+    ERROR_CONTENT_TYPE_MISSING,
+    ERROR_CONTENT_TYPE_UNSUPPORTED,
+    ERROR_DECLARED_CONTENT_TOO_LARGE,
+)
 from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
 from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
@@ -29,6 +34,19 @@ async def _allow_all_urls(
         resolved_ip="93.184.216.34",
         host_header=host_header,
     )
+
+
+class _TrackingAsyncByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.was_iterated = False
+
+    async def __aiter__(self):
+        self.was_iterated = True
+        yield self.content
+
+    async def aclose(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -96,7 +114,12 @@ async def test_fetch_url_caps_response_body_by_max_preview_bytes(
     runtime_settings = Settings(max_preview_bytes=5)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code=200, content=b"abcdefghij", request=request)
+        return httpx.Response(
+            status_code=200,
+            headers={"content-length": "5"},
+            content=b"abcdefghij",
+            request=request,
+        )
 
     transport = httpx.MockTransport(handler)
 
@@ -119,7 +142,12 @@ async def test_fetch_url_respects_explicit_max_bytes(
     runtime_settings = Settings(max_preview_bytes=5)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code=200, content=b"abcdefghij", request=request)
+        return httpx.Response(
+            status_code=200,
+            headers={"content-length": "8"},
+            content=b"abcdefghij",
+            request=request,
+        )
 
     transport = httpx.MockTransport(handler)
 
@@ -133,6 +161,112 @@ async def test_fetch_url_respects_explicit_max_bytes(
 
     assert response.status_code == 200
     assert response.content == b"abcdefgh"
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_rejects_oversized_declared_content_before_body_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    runtime_settings = Settings(max_preview_bytes=5)
+    stream = _TrackingAsyncByteStream(b"abcde")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-length": "6"},
+            stream=stream,
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.fetch_url(
+                client,
+                "https://example.com",
+                app_settings=runtime_settings,
+            )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == ERROR_DECLARED_CONTENT_TOO_LARGE
+    assert stream.was_iterated is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "expected_detail"),
+    [
+        ({"content-length": "2"}, ERROR_CONTENT_TYPE_MISSING),
+        (
+            {
+                "content-length": "2",
+                "content-type": "application/octet-stream",
+            },
+            ERROR_CONTENT_TYPE_UNSUPPORTED,
+        ),
+    ],
+)
+async def test_fetch_url_rejects_unacceptable_content_type_before_body_iteration(
+    headers: dict[str, str],
+    expected_detail: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    stream = _TrackingAsyncByteStream(b"ok")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers=headers,
+            stream=stream,
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.fetch_url(
+                client,
+                "https://example.com",
+                allowed_content_types=("text/plain", "text/html"),
+            )
+
+    assert exc_info.value.status_code == 415
+    assert exc_info.value.detail == expected_detail
+    assert stream.was_iterated is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_accepts_parameterized_supported_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={
+                "content-length": "2",
+                "content-type": "Text/HTML; charset=UTF-8",
+            },
+            content=b"ok",
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await ingestion_service.fetch_url(
+            client,
+            "https://example.com",
+            allowed_content_types=("text/html",),
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"ok"
 
 
 @pytest.mark.asyncio
@@ -509,6 +643,7 @@ async def test_preview_url_returns_expected_preview_payload(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         request = httpx.Request(method, "https://example.com")
@@ -551,12 +686,14 @@ async def test_preview_parsed_url_returns_expected_preview_payload(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         captured["url"] = url
         captured["method"] = method
         captured["url_timeout"] = url_timeout
         captured["max_bytes"] = max_bytes
+        captured["allowed_content_types"] = allowed_content_types
         captured["app_settings"] = app_settings
 
         request = httpx.Request(method, url)
@@ -601,6 +738,10 @@ async def test_preview_parsed_url_returns_expected_preview_payload(
     assert result.parsed_char_length == 20
     assert result.parsed_preview == "parsed"
     assert captured["max_bytes"] == 1234
+    assert (
+        captured["allowed_content_types"]
+        == runtime_settings.allowed_parse_content_types
+    )
     assert captured["parse_content"] == b"raw pdf bytes"
     assert captured["parse_content_type"] == "application/pdf"
     assert captured["parse_source_url"] == "https://example.com/file.pdf"
@@ -618,6 +759,7 @@ async def test_preview_url_maps_timeout_exception_to_504(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         request = httpx.Request(method, "https://example.com")
@@ -645,6 +787,7 @@ async def test_preview_url_maps_http_status_error_to_502_with_upstream_code(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         request = httpx.Request(method, "https://example.com")
@@ -677,6 +820,7 @@ async def test_preview_url_maps_network_error_to_502(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         request = httpx.Request(method, "https://example.com")
@@ -704,6 +848,7 @@ async def test_preview_url_maps_asyncio_timeout_to_504(
         method: str = "GET",
         url_timeout: float | None = None,
         max_bytes: int | None = None,
+        allowed_content_types: tuple[str, ...] | None = None,
         app_settings: Settings | None = None,
     ) -> httpx.Response:
         raise TimeoutError("per-URL timeout exceeded")

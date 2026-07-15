@@ -9,6 +9,9 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from ai_ingestion_retrieval_platform.core.config import Settings
+from ai_ingestion_retrieval_platform.core.response_admission import (
+    normalize_content_type,
+)
 from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument, ParseRequest
 
 ERROR_PARSE_CONTENT_TOO_LARGE = "Document is too large to parse"
@@ -16,10 +19,6 @@ ERROR_PARSE_CONTENT_TYPE_UNSUPPORTED = "Content type is not supported for parsin
 ERROR_PARSE_TIMEOUT = "Document parsing timed out"
 ERROR_PARSE_PDF_MALFORMED = "PDF could not be parsed"
 ERROR_PARSE_PDF_TOO_MANY_PAGES = "PDF has too many pages to parse"
-
-
-def _normalize_content_type(content_type: str) -> str:
-    return content_type.split(";", 1)[0].strip().lower()
 
 
 def _truncate_text(text: str, settings: Settings) -> str:
@@ -35,7 +34,7 @@ def _build_parsed_document(
 
     return ParsedDocument(
         text=text,
-        content_type=_normalize_content_type(request.content_type),
+        content_type=normalize_content_type(request.content_type) or "",
         source_url=request.source_url,
         byte_length=len(request.content),
         char_length=len(text),
@@ -93,7 +92,7 @@ def _parse_document_sync(
     request: ParseRequest,
     settings: Settings,
 ) -> ParsedDocument:
-    normalized_content_type = _normalize_content_type(request.content_type)
+    normalized_content_type = normalize_content_type(request.content_type) or ""
 
     if normalized_content_type not in settings.allowed_parse_content_types:
         raise HTTPException(
