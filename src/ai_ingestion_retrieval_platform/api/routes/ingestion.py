@@ -5,6 +5,9 @@ from typing import Annotated
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
+from ai_ingestion_retrieval_platform.api.dependencies.auth import (
+    require_ingestion_auth,
+)
 from ai_ingestion_retrieval_platform.api.dependencies.http_client import get_http_client
 from ai_ingestion_retrieval_platform.api.dependencies.rate_limit import (
     rate_limit_batch_preview,
@@ -29,7 +32,7 @@ from ai_ingestion_retrieval_platform.services.ingestion import (
     preview_urls,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_ingestion_auth)])
 
 HttpClientDependency = Annotated[httpx.AsyncClient, Depends(get_http_client)]
 AppSettingsDependency = Annotated[Settings, Depends(get_app_settings)]

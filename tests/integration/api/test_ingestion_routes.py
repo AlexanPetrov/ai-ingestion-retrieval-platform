@@ -3,6 +3,9 @@
 import httpx
 import pytest
 
+from ai_ingestion_retrieval_platform.api.dependencies.auth import (
+    AUTHENTICATION_REQUIRED_DETAIL,
+)
 from ai_ingestion_retrieval_platform.api.routes import ingestion as ingestion_routes
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.main import create_app
@@ -539,3 +542,136 @@ async def test_urls_parse_preview_route_returns_429_when_rate_limited(
     assert second_response.status_code == 429
     assert second_response.json() == {"detail": "Rate limit exceeded"}
     assert int(second_response.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/ingestion/url/preview",
+            {"url": "https://example.com"},
+        ),
+        (
+            "/ingestion/url/parse-preview",
+            {"url": "https://example.com"},
+        ),
+        (
+            "/ingestion/urls/preview",
+            {"urls": ["https://example.com"]},
+        ),
+        (
+            "/ingestion/urls/parse-preview",
+            {"urls": ["https://example.com"]},
+        ),
+    ],
+)
+async def test_ingestion_routes_require_authentication_when_enabled(
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    settings = Settings(
+        rate_limit_enabled=False,
+        ingestion_auth_enabled=True,
+        ingestion_auth_token="expected-token",
+    )
+    app = create_app(settings)
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(path, json=payload)
+
+    app.state.http_client = None
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": AUTHENTICATION_REQUIRED_DETAIL,
+    }
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.asyncio
+async def test_ingestion_route_rejects_invalid_bearer_token() -> None:
+    settings = Settings(
+        rate_limit_enabled=False,
+        ingestion_auth_enabled=True,
+        ingestion_auth_token="expected-token",
+    )
+    app = create_app(settings)
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "https://example.com"},
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+
+    app.state.http_client = None
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": AUTHENTICATION_REQUIRED_DETAIL,
+    }
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.asyncio
+async def test_ingestion_route_accepts_configured_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        rate_limit_enabled=False,
+        ingestion_auth_enabled=True,
+        ingestion_auth_token="expected-token",
+    )
+    app = create_app(settings)
+
+    async def fake_preview_url(
+        url: object,
+        _client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
+    ) -> dict[str, object]:
+        assert app_settings is settings
+
+        return {
+            "url": str(url),
+            "status_code": 200,
+            "content_type": "text/plain",
+            "content_length": 2,
+            "elapsed_ms": 0.5,
+            "preview": "ok",
+        }
+
+    monkeypatch.setattr(ingestion_routes, "preview_url", fake_preview_url)
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/ingestion/url/preview",
+                json={"url": "https://example.com"},
+                headers={"Authorization": "Bearer expected-token"},
+            )
+
+    app.state.http_client = None
+
+    assert response.status_code == 200
+    assert response.json()["preview"] == "ok"

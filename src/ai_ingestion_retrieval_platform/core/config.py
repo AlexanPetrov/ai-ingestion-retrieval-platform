@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     metrics_enabled: bool = False  # Enable or hide /metrics endpoint.
     metrics_token: str | None = None  # Bearer token for /metrics access.
 
+    # Ingestion API authentication
+    ingestion_auth_enabled: bool = False
+    ingestion_auth_token: str | None = None
+
     # Timeouts
     # main.py
     http_timeout_connect_seconds: float = Field(
