@@ -15,7 +15,7 @@ from ai_ingestion_retrieval_platform.main import create_app
 async def test_url_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = Settings(rate_limit_enabled=False)
+    settings = Settings(rate_limit_enabled=False, ingestion_auth_enabled=False)
     app = create_app(settings)
 
     async def fake_preview_url(
@@ -68,7 +68,7 @@ async def test_url_preview_route_returns_expected_contract(
 async def test_url_parse_preview_route_returns_expected_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = Settings(rate_limit_enabled=False)
+    settings = Settings(rate_limit_enabled=False, ingestion_auth_enabled=False)
     app = create_app(settings)
 
     async def fake_preview_parsed_url(
@@ -131,6 +131,7 @@ async def test_urls_preview_route_forwards_urls_and_app_default_concurrency(
 ) -> None:
     settings = Settings(
         rate_limit_enabled=False,
+        ingestion_auth_enabled=False,
         default_max_concurrency=4,
     )
     app = create_app(settings)
@@ -196,6 +197,7 @@ async def test_urls_parse_preview_route_forwards_urls_and_app_default_concurrenc
 ) -> None:
     settings = Settings(
         rate_limit_enabled=False,
+        ingestion_auth_enabled=False,
         default_max_concurrency=4,
     )
     app = create_app(settings)
@@ -266,7 +268,7 @@ async def test_urls_parse_preview_route_forwards_urls_and_app_default_concurrenc
 
 @pytest.mark.asyncio
 async def test_url_preview_route_rejects_invalid_url() -> None:
-    app = create_app(Settings(rate_limit_enabled=False))
+    app = create_app(Settings(rate_limit_enabled=False, ingestion_auth_enabled=False))
 
     async with httpx.AsyncClient() as shared_client:
         app.state.http_client = shared_client
@@ -290,6 +292,8 @@ async def test_url_preview_route_rejects_invalid_url() -> None:
 async def test_urls_preview_route_rejects_app_specific_concurrency_limit() -> None:
     settings = Settings(
         rate_limit_enabled=False,
+        ingestion_auth_enabled=False,
+        default_max_concurrency=2,
         max_allowed_concurrency=2,
     )
     app = create_app(settings)
@@ -321,6 +325,7 @@ async def test_urls_preview_route_rejects_app_specific_concurrency_limit() -> No
 async def test_urls_preview_route_rejects_app_specific_batch_limit() -> None:
     settings = Settings(
         rate_limit_enabled=False,
+        ingestion_auth_enabled=False,
         max_batch_urls=1,
     )
     app = create_app(settings)
@@ -356,6 +361,7 @@ async def test_url_preview_route_returns_429_when_rate_limited(
 ) -> None:
     settings = Settings(
         rate_limit_enabled=True,
+        ingestion_auth_enabled=False,
         rate_limit_redis_url="async+memory://",
         rate_limit_url_preview_requests=1,
         rate_limit_url_preview_window_seconds=60,
@@ -412,6 +418,7 @@ async def test_urls_preview_route_returns_429_when_rate_limited(
 ) -> None:
     settings = Settings(
         rate_limit_enabled=True,
+        ingestion_auth_enabled=False,
         rate_limit_redis_url="async+memory://",
         rate_limit_batch_preview_requests=1,
         rate_limit_batch_preview_window_seconds=60,
@@ -475,6 +482,7 @@ async def test_urls_parse_preview_route_returns_429_when_rate_limited(
 ) -> None:
     settings = Settings(
         rate_limit_enabled=True,
+        ingestion_auth_enabled=False,
         rate_limit_redis_url="async+memory://",
         rate_limit_batch_preview_requests=1,
         rate_limit_batch_preview_window_seconds=60,

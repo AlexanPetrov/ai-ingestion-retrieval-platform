@@ -74,11 +74,13 @@ async def test_require_ingestion_auth_allows_valid_bearer_token() -> None:
 async def test_require_ingestion_auth_fails_closed_when_token_is_not_configured(
     configured_token: str | None,
 ) -> None:
+    settings = Settings.model_construct(
+        ingestion_auth_enabled=True,
+        ingestion_auth_token=configured_token,
+    )
+
     response = await _get_protected_route(
-        Settings(
-            ingestion_auth_enabled=True,
-            ingestion_auth_token=configured_token,
-        ),
+        settings,
         authorization="Bearer any-token",
     )
 

@@ -1,8 +1,9 @@
 """Environment-backed runtime settings and safety limits."""
 
 from functools import lru_cache
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,8 +22,9 @@ class Settings(BaseSettings):
     metrics_token: str | None = None  # Bearer token for /metrics access.
 
     # Ingestion API authentication
-    ingestion_auth_enabled: bool = False
-    ingestion_auth_token: str | None = None
+    # api/dependencies/auth.py, api/routes/ingestion.py
+    ingestion_auth_enabled: bool = False  # Require bearer auth on ingestion routes.
+    ingestion_auth_token: str | None = None  # Bearer token for ingestion access.
 
     # Timeouts
     # main.py
@@ -52,7 +54,7 @@ class Settings(BaseSettings):
     )  # How long idle connections stay open.
 
     # Ingestion safety and preview limits
-    # services/ingestion.py, schemas/ingestion.py, core/url_safety.py
+    # services/ingestion.py, api/routes/ingestion.py, core/url_safety.py
     max_redirects: int = Field(default=5, ge=0)  # Max redirect hops per URL fetch.
     max_preview_bytes: int = Field(default=65_536, ge=1)  # Max response bytes to read.
     max_preview_text_chars: int = Field(default=500, ge=1)  # Max preview text returned.
@@ -62,7 +64,7 @@ class Settings(BaseSettings):
     allowed_fetch_ports: tuple[int, ...] = (80, 443)  # Allowed outbound URL ports.
 
     # Parser boundary limits
-    # services/parsing.py
+    # services/ingestion.py, services/parsing.py
     max_parse_bytes: int = Field(default=5_000_000, ge=1)  # Max bytes sent to parser.
     max_parsed_text_chars: int = Field(
         default=100_000, ge=1
@@ -88,7 +90,7 @@ class Settings(BaseSettings):
     url_timeout_seconds: float = Field(default=10.0, gt=0)  # Max total time per URL.
 
     # Concurrency and limiter controls
-    # schemas/ingestion.py, services/ingestion.py, core/limits.py
+    # api/routes/ingestion.py, services/ingestion.py, core/limits.py
     default_max_concurrency: int = Field(default=3, ge=1)  # Default batch concurrency.
     max_allowed_concurrency: int = Field(
         default=10, ge=1
@@ -121,6 +123,38 @@ class Settings(BaseSettings):
     rate_limit_batch_preview_window_seconds: int = Field(
         default=60, ge=1
     )  # Batch preview window size.
+
+    @model_validator(mode="after")
+    def validate_setting_relationships(self) -> Self:
+        """Reject contradictory or incomplete runtime configuration."""
+        if self.default_max_concurrency > self.max_allowed_concurrency:
+            raise ValueError(
+                "default_max_concurrency cannot exceed max_allowed_concurrency"
+            )
+
+        if self.http_max_keepalive_connections > self.http_max_connections:
+            raise ValueError(
+                "http_max_keepalive_connections cannot exceed http_max_connections"
+            )
+
+        if self.retry_backoff_initial_seconds > self.retry_backoff_max_seconds:
+            raise ValueError(
+                "retry_backoff_initial_seconds cannot exceed retry_backoff_max_seconds"
+            )
+
+        if self.ingestion_auth_enabled and not (
+            self.ingestion_auth_token and self.ingestion_auth_token.strip()
+        ):
+            raise ValueError(
+                "ingestion_auth_token is required when ingestion_auth_enabled is true"
+            )
+
+        if self.metrics_enabled and not (
+            self.metrics_token and self.metrics_token.strip()
+        ):
+            raise ValueError("metrics_token is required when metrics_enabled is true")
+
+        return self
 
 
 @lru_cache
