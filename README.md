@@ -19,7 +19,8 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Connection pooling, phase-specific HTTP timeouts, and per-URL timeout enforcement
 - Retry and backoff with 429 Retry-After support
 - Partial batch failure handling with typed error mapping
-- Saturation metrics: limiter wait times, in-flight tracking, timeout instrumentation
+- Operational metrics for HTTP traffic, ingestion retries/timeouts, limiter saturation, rate-limit decisions, and parser behavior
+- Parser metrics for document parsing attempts, latency, input size, and extracted character counts
 - Structured JSON logs with request correlation IDs
 - Protected Prometheus metrics endpoint disabled by default
 - ASGI request logging middleware with latency and error metrics
@@ -38,6 +39,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Optional Bearer authentication for all ingestion routes, with app-scoped configuration and Swagger/OpenAPI integration
 - Cross-setting configuration validation rejects contradictory limits and incomplete security configuration during application startup
 - Weighted inbound rate limiting for ingestion routes, with parsed requests and batch URL counts consuming higher rate-limit cost
+- Parser metrics for document parsing attempts, latency, input size, and extracted character counts
 
 ## Stack
 
@@ -154,7 +156,7 @@ Current focus:
 - Basic ingestion-route authentication (complete)
 - Cross-setting configuration validation (complete)
 - Weighted rate-limit costing (complete)
-- Remaining pre-persistence hardening (ongoing)
+- Parser metrics (complete)
 - Persistence, indexing, and retrieval (planned)
 
 Next phase:

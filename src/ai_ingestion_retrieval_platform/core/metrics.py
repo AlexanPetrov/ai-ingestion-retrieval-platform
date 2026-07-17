@@ -77,3 +77,27 @@ INBOUND_RATE_LIMIT_STORAGE_ERROR_TOTAL = Counter(
     "Total inbound API rate-limit storage failures.",
     ["policy"],
 )
+
+PARSER_REQUESTS_TOTAL = Counter(
+    "parser_requests_total",
+    "Total document parser attempts.",
+    ["content_type", "result"],
+)
+
+PARSER_DURATION_SECONDS = Histogram(
+    "parser_duration_seconds",
+    "Document parser latency in seconds.",
+    ["content_type"],
+)
+
+PARSER_INPUT_BYTES = Histogram(
+    "parser_input_bytes",
+    "Document parser input size in bytes.",
+    ["content_type"],
+)
+
+PARSER_EXTRACTED_CHARS = Histogram(
+    "parser_extracted_chars",
+    "Document parser extracted character count.",
+    ["content_type"],
+)
