@@ -3,15 +3,15 @@
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ai_ingestion_retrieval_platform.api.dependencies.auth import (
     require_ingestion_auth,
 )
 from ai_ingestion_retrieval_platform.api.dependencies.http_client import get_http_client
 from ai_ingestion_retrieval_platform.api.dependencies.rate_limit import (
-    rate_limit_batch_preview,
-    rate_limit_url_preview,
+    enforce_batch_preview_rate_limit,
+    enforce_url_preview_rate_limit,
 )
 from ai_ingestion_retrieval_platform.api.dependencies.settings import (
     get_app_settings,
@@ -36,8 +36,6 @@ router = APIRouter(dependencies=[Depends(require_ingestion_auth)])
 
 HttpClientDependency = Annotated[httpx.AsyncClient, Depends(get_http_client)]
 AppSettingsDependency = Annotated[Settings, Depends(get_app_settings)]
-UrlPreviewRateLimit = Annotated[None, Depends(rate_limit_url_preview)]
-BatchPreviewRateLimit = Annotated[None, Depends(rate_limit_batch_preview)]
 
 
 def _resolve_batch_max_concurrency(
@@ -68,13 +66,58 @@ def _resolve_batch_max_concurrency(
     return max_concurrency
 
 
+async def _enforce_single_url_rate_limit(
+    request: Request,
+    settings: Settings,
+    *,
+    parsed_preview: bool,
+) -> None:
+    """Apply weighted rate limiting for single-URL ingestion routes."""
+    cost = (
+        settings.rate_limit_url_parse_preview_cost
+        if parsed_preview
+        else settings.rate_limit_url_preview_cost
+    )
+
+    await enforce_url_preview_rate_limit(
+        request=request,
+        cost=cost,
+    )
+
+
+async def _enforce_batch_rate_limit(
+    request: Request,
+    payload: BatchUrlIngestionRequest,
+    settings: Settings,
+    *,
+    parsed_preview: bool,
+) -> None:
+    """Apply weighted rate limiting for batch ingestion routes."""
+    per_url_cost = (
+        settings.rate_limit_batch_parse_preview_url_cost
+        if parsed_preview
+        else settings.rate_limit_batch_preview_url_cost
+    )
+
+    await enforce_batch_preview_rate_limit(
+        request=request,
+        cost=len(payload.urls) * per_url_cost,
+    )
+
+
 @router.post("/url/preview", response_model=UrlIngestionPreview)
 async def preview_url_ingestion(
     request: UrlIngestionRequest,
+    http_request: Request,
     http_client: HttpClientDependency,
     app_settings: AppSettingsDependency,
-    _rate_limit: UrlPreviewRateLimit,
 ) -> UrlIngestionPreview:
+    await _enforce_single_url_rate_limit(
+        request=http_request,
+        settings=app_settings,
+        parsed_preview=False,
+    )
+
     return await preview_url(
         request.url,
         http_client,
@@ -85,10 +128,16 @@ async def preview_url_ingestion(
 @router.post("/url/parse-preview", response_model=UrlParsedIngestionPreview)
 async def preview_parsed_url_ingestion(
     request: UrlIngestionRequest,
+    http_request: Request,
     http_client: HttpClientDependency,
     app_settings: AppSettingsDependency,
-    _rate_limit: UrlPreviewRateLimit,
 ) -> UrlParsedIngestionPreview:
+    await _enforce_single_url_rate_limit(
+        request=http_request,
+        settings=app_settings,
+        parsed_preview=True,
+    )
+
     return await preview_parsed_url(
         request.url,
         http_client,
@@ -99,11 +148,18 @@ async def preview_parsed_url_ingestion(
 @router.post("/urls/preview", response_model=list[UrlIngestionBatchResult])
 async def preview_urls_ingestion(
     request: BatchUrlIngestionRequest,
+    http_request: Request,
     http_client: HttpClientDependency,
     app_settings: AppSettingsDependency,
-    _rate_limit: BatchPreviewRateLimit,
 ) -> list[UrlIngestionBatchResult]:
     max_concurrency = _resolve_batch_max_concurrency(request, app_settings)
+
+    await _enforce_batch_rate_limit(
+        request=http_request,
+        payload=request,
+        settings=app_settings,
+        parsed_preview=False,
+    )
 
     return await preview_urls(
         urls=request.urls,
@@ -119,11 +175,18 @@ async def preview_urls_ingestion(
 )
 async def preview_parsed_urls_ingestion(
     request: BatchUrlIngestionRequest,
+    http_request: Request,
     http_client: HttpClientDependency,
     app_settings: AppSettingsDependency,
-    _rate_limit: BatchPreviewRateLimit,
 ) -> list[UrlParsedIngestionBatchResult]:
     max_concurrency = _resolve_batch_max_concurrency(request, app_settings)
+
+    await _enforce_batch_rate_limit(
+        request=http_request,
+        payload=request,
+        settings=app_settings,
+        parsed_preview=True,
+    )
 
     return await preview_parsed_urls(
         urls=request.urls,

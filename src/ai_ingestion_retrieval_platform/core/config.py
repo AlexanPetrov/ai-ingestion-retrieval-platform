@@ -123,6 +123,18 @@ class Settings(BaseSettings):
     rate_limit_batch_preview_window_seconds: int = Field(
         default=60, ge=1
     )  # Batch preview window size.
+    rate_limit_url_preview_cost: int = Field(
+        default=1, ge=1
+    )  # Cost for raw single-URL preview.
+    rate_limit_url_parse_preview_cost: int = Field(
+        default=2, ge=1
+    )  # Cost for parsed single-URL preview.
+    rate_limit_batch_preview_url_cost: int = Field(
+        default=1, ge=1
+    )  # Cost per URL in raw batch preview.
+    rate_limit_batch_parse_preview_url_cost: int = Field(
+        default=2, ge=1
+    )  # Cost per URL in parsed batch preview.
 
     @model_validator(mode="after")
     def validate_setting_relationships(self) -> Self:

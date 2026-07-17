@@ -37,6 +37,7 @@ Production-grade async ingestion and retrieval platform built with FastAPI and m
 - Health-probe log suppression while preserving request IDs, metrics, and failed readiness logs
 - Optional Bearer authentication for all ingestion routes, with app-scoped configuration and Swagger/OpenAPI integration
 - Cross-setting configuration validation rejects contradictory limits and incomplete security configuration during application startup
+- Weighted inbound rate limiting for ingestion routes, with parsed requests and batch URL counts consuming higher rate-limit cost
 
 ## Stack
 
@@ -70,12 +71,6 @@ cp .env.example .env
 # Required when RATE_LIMIT_ENABLED=true
 brew services start redis
 redis-cli ping
-
-# When INGESTION_AUTH_ENABLED=true, ingestion routes require the configured Bearer token. 
-# In Swagger, click Authorize and enter only the token value. Health endpoints remain unprotected, and /metrics continues to use its separate METRICS_TOKEN.
-# Ingestion API authentication
-INGESTION_AUTH_ENABLED=false
-INGESTION_AUTH_TOKEN=change-me
 
 PYTHONPATH=src uv run uvicorn ai_ingestion_retrieval_platform.main:create_app --factory --reload
 ```
@@ -157,8 +152,9 @@ Current focus:
 - Operational liveness, readiness, and shared-resource lifecycle hardening (complete)
 - Response admission validation (complete)
 - Basic ingestion-route authentication (complete)
-- Remaining platform hardening (next)
 - Cross-setting configuration validation (complete)
+- Weighted rate-limit costing (complete)
+- Remaining pre-persistence hardening (ongoing)
 - Persistence, indexing, and retrieval (planned)
 
 Next phase:

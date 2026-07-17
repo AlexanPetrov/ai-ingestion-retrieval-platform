@@ -26,6 +26,13 @@ class RateLimitPolicy:
     window_seconds: int
 
 
+def _validate_rate_limit_cost(cost: int) -> int:
+    if cost < 1:
+        raise ValueError("rate limit cost must be at least 1")
+
+    return cost
+
+
 def _to_async_redis_url(redis_url: str) -> str:
     if redis_url.startswith("async+"):
         return redis_url
@@ -129,11 +136,14 @@ async def _get_retry_after_seconds(
 async def enforce_rate_limit(
     request: Request,
     policy: RateLimitPolicy,
+    cost: int = 1,
 ) -> None:
     settings = get_app_settings(request)
 
     if not settings.rate_limit_enabled:
         return
+
+    cost = _validate_rate_limit_cost(cost)
 
     limit = RateLimitItemPerSecond(policy.requests, policy.window_seconds)
     identifiers = (
@@ -144,7 +154,7 @@ async def enforce_rate_limit(
 
     try:
         limiter = _get_rate_limiter(request, settings)
-        allowed = await limiter.hit(limit, *identifiers)
+        allowed = await limiter.hit(limit, *identifiers, cost=cost)
 
         if allowed:
             INBOUND_RATE_LIMIT_TOTAL.labels(
@@ -183,7 +193,10 @@ async def enforce_rate_limit(
     )
 
 
-async def rate_limit_url_preview(request: Request) -> None:
+async def enforce_url_preview_rate_limit(
+    request: Request,
+    cost: int,
+) -> None:
     settings = get_app_settings(request)
 
     await enforce_rate_limit(
@@ -193,10 +206,14 @@ async def rate_limit_url_preview(request: Request) -> None:
             requests=settings.rate_limit_url_preview_requests,
             window_seconds=settings.rate_limit_url_preview_window_seconds,
         ),
+        cost=cost,
     )
 
 
-async def rate_limit_batch_preview(request: Request) -> None:
+async def enforce_batch_preview_rate_limit(
+    request: Request,
+    cost: int,
+) -> None:
     settings = get_app_settings(request)
 
     await enforce_rate_limit(
@@ -206,4 +223,5 @@ async def rate_limit_batch_preview(request: Request) -> None:
             requests=settings.rate_limit_batch_preview_requests,
             window_seconds=settings.rate_limit_batch_preview_window_seconds,
         ),
+        cost=cost,
     )

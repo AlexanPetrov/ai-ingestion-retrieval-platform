@@ -477,6 +477,145 @@ async def test_urls_preview_route_returns_429_when_rate_limited(
 
 
 @pytest.mark.asyncio
+async def test_url_parse_preview_route_uses_weighted_rate_limit_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        rate_limit_enabled=True,
+        ingestion_auth_enabled=False,
+        rate_limit_redis_url="async+memory://",
+        rate_limit_url_preview_requests=2,
+        rate_limit_url_preview_window_seconds=60,
+    )
+    app = create_app(settings)
+
+    async def fake_preview_parsed_url(
+        url: object,
+        _client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
+    ) -> dict[str, object]:
+        assert app_settings is settings
+
+        return {
+            "url": str(url),
+            "status_code": 200,
+            "content_type": "text/html",
+            "content_length": 10,
+            "elapsed_ms": 0.8,
+            "parsed_content_type": "text/html",
+            "parsed_char_length": 5,
+            "parsed_preview": "hello",
+        }
+
+    monkeypatch.setattr(
+        ingestion_routes,
+        "preview_parsed_url",
+        fake_preview_parsed_url,
+    )
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            first_response = await client.post(
+                "/ingestion/url/parse-preview",
+                json={"url": "https://example.com"},
+            )
+            second_response = await client.post(
+                "/ingestion/url/parse-preview",
+                json={"url": "https://example.com"},
+            )
+
+    app.state.http_client = None
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json() == {"detail": "Rate limit exceeded"}
+    assert int(second_response.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_urls_preview_route_uses_url_count_rate_limit_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        rate_limit_enabled=True,
+        ingestion_auth_enabled=False,
+        rate_limit_redis_url="async+memory://",
+        rate_limit_batch_preview_requests=2,
+        rate_limit_batch_preview_window_seconds=60,
+    )
+    app = create_app(settings)
+
+    async def fake_preview_urls(
+        urls: list[object],
+        max_concurrency: int,
+        client: httpx.AsyncClient,
+        app_settings: Settings | None = None,
+    ) -> list[dict[str, object]]:
+        assert isinstance(client, httpx.AsyncClient)
+        assert app_settings is settings
+
+        normalized_urls = [str(url) for url in urls]
+        return [
+            {
+                "url": normalized_url,
+                "success": True,
+                "data": {
+                    "url": normalized_url,
+                    "status_code": 200,
+                    "content_type": "text/plain",
+                    "content_length": 2,
+                    "elapsed_ms": 0.5,
+                    "preview": "ok",
+                },
+                "error": None,
+            }
+            for normalized_url in normalized_urls
+        ]
+
+    monkeypatch.setattr(ingestion_routes, "preview_urls", fake_preview_urls)
+
+    first_payload = {
+        "urls": [
+            "https://example.com/one",
+            "https://example.com/two",
+        ],
+    }
+    second_payload = {
+        "urls": ["https://example.com/three"],
+    }
+
+    async with httpx.AsyncClient() as shared_client:
+        app.state.http_client = shared_client
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            first_response = await client.post(
+                "/ingestion/urls/preview",
+                json=first_payload,
+            )
+            second_response = await client.post(
+                "/ingestion/urls/preview",
+                json=second_payload,
+            )
+
+    app.state.http_client = None
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json() == {"detail": "Rate limit exceeded"}
+    assert int(second_response.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
 async def test_urls_parse_preview_route_returns_429_when_rate_limited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -484,7 +623,7 @@ async def test_urls_parse_preview_route_returns_429_when_rate_limited(
         rate_limit_enabled=True,
         ingestion_auth_enabled=False,
         rate_limit_redis_url="async+memory://",
-        rate_limit_batch_preview_requests=1,
+        rate_limit_batch_preview_requests=2,
         rate_limit_batch_preview_window_seconds=60,
     )
     app = create_app(settings)
