@@ -17,6 +17,7 @@ from ai_ingestion_retrieval_platform.core.response_admission import (
 )
 from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
 from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
+from ai_ingestion_retrieval_platform.services import fetching as fetching_service
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
 
 
@@ -53,7 +54,7 @@ class _TrackingAsyncByteStream(httpx.AsyncByteStream):
 async def test_fetch_url_redirect_missing_location_returns_controlled_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code=302, request=request)
@@ -62,11 +63,11 @@ async def test_fetch_url_redirect_missing_location_returns_controlled_400(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(HTTPException) as exc_info:
-            await ingestion_service.fetch_url(client, "https://example.com")
+            await fetching_service.fetch_url(client, "https://example.com")
 
     assert exc_info.value.status_code == 400
     assert (
-        str(exc_info.value.detail) == ingestion_service.ERROR_REDIRECT_MISSING_LOCATION
+        str(exc_info.value.detail) == fetching_service.ERROR_REDIRECT_MISSING_LOCATION
     )
 
 
@@ -74,7 +75,7 @@ async def test_fetch_url_redirect_missing_location_returns_controlled_400(
 async def test_fetch_url_too_many_redirects_returns_controlled_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(max_redirects=1)
 
     call_count = 0
@@ -95,7 +96,7 @@ async def test_fetch_url_too_many_redirects_returns_controlled_400(
         base_url="https://example.com",
     ) as client:
         with pytest.raises(HTTPException) as exc_info:
-            await ingestion_service.fetch_url(
+            await fetching_service.fetch_url(
                 client,
                 "https://example.com/start",
                 app_settings=runtime_settings,
@@ -103,14 +104,14 @@ async def test_fetch_url_too_many_redirects_returns_controlled_400(
 
     assert call_count == 2
     assert exc_info.value.status_code == 400
-    assert str(exc_info.value.detail) == ingestion_service.ERROR_TOO_MANY_REDIRECTS
+    assert str(exc_info.value.detail) == fetching_service.ERROR_TOO_MANY_REDIRECTS
 
 
 @pytest.mark.asyncio
 async def test_fetch_url_caps_response_body_by_max_preview_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(max_preview_bytes=5)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -124,7 +125,7 @@ async def test_fetch_url_caps_response_body_by_max_preview_bytes(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(
+        response = await fetching_service.fetch_url(
             client,
             "https://example.com",
             app_settings=runtime_settings,
@@ -138,7 +139,7 @@ async def test_fetch_url_caps_response_body_by_max_preview_bytes(
 async def test_fetch_url_respects_explicit_max_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(max_preview_bytes=5)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -152,7 +153,7 @@ async def test_fetch_url_respects_explicit_max_bytes(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(
+        response = await fetching_service.fetch_url(
             client,
             "https://example.com",
             max_bytes=8,
@@ -167,7 +168,7 @@ async def test_fetch_url_respects_explicit_max_bytes(
 async def test_fetch_url_rejects_oversized_declared_content_before_body_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(max_preview_bytes=5)
     stream = _TrackingAsyncByteStream(b"abcde")
 
@@ -183,7 +184,7 @@ async def test_fetch_url_rejects_oversized_declared_content_before_body_iteratio
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(HTTPException) as exc_info:
-            await ingestion_service.fetch_url(
+            await fetching_service.fetch_url(
                 client,
                 "https://example.com",
                 app_settings=runtime_settings,
@@ -213,7 +214,7 @@ async def test_fetch_url_rejects_unacceptable_content_type_before_body_iteration
     expected_detail: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     stream = _TrackingAsyncByteStream(b"ok")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -228,7 +229,7 @@ async def test_fetch_url_rejects_unacceptable_content_type_before_body_iteration
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(HTTPException) as exc_info:
-            await ingestion_service.fetch_url(
+            await fetching_service.fetch_url(
                 client,
                 "https://example.com",
                 allowed_content_types=("text/plain", "text/html"),
@@ -243,7 +244,7 @@ async def test_fetch_url_rejects_unacceptable_content_type_before_body_iteration
 async def test_fetch_url_accepts_parameterized_supported_content_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -259,7 +260,7 @@ async def test_fetch_url_accepts_parameterized_supported_content_type(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(
+        response = await fetching_service.fetch_url(
             client,
             "https://example.com",
             allowed_content_types=("text/html",),
@@ -273,11 +274,9 @@ async def test_fetch_url_accepts_parameterized_supported_content_type(
 async def test_fetch_url_retries_retryable_http_status_and_eventually_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(3)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(3))
 
     call_count = 0
 
@@ -291,7 +290,7 @@ async def test_fetch_url_retries_retryable_http_status_and_eventually_succeeds(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(client, "https://example.com")
+        response = await fetching_service.fetch_url(client, "https://example.com")
 
     assert call_count == 3
     assert response.status_code == 200
@@ -302,11 +301,9 @@ async def test_fetch_url_retries_retryable_http_status_and_eventually_succeeds(
 async def test_fetch_url_does_not_retry_read_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(5))
 
     call_count = 0
 
@@ -319,7 +316,7 @@ async def test_fetch_url_does_not_retry_read_timeout(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(httpx.ReadTimeout):
-            await ingestion_service.fetch_url(client, "https://example.com")
+            await fetching_service.fetch_url(client, "https://example.com")
 
     assert call_count == 1
 
@@ -328,11 +325,9 @@ async def test_fetch_url_does_not_retry_read_timeout(
 async def test_fetch_url_retries_connect_error_until_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(3)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(3))
 
     call_count = 0
 
@@ -345,7 +340,7 @@ async def test_fetch_url_retries_connect_error_until_stop(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(httpx.ConnectError):
-            await ingestion_service.fetch_url(client, "https://example.com")
+            await fetching_service.fetch_url(client, "https://example.com")
 
     assert call_count == 3
 
@@ -354,11 +349,9 @@ async def test_fetch_url_retries_connect_error_until_stop(
 async def test_fetch_url_does_not_retry_connect_error_for_post_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(5))
 
     call_count = 0
 
@@ -371,7 +364,7 @@ async def test_fetch_url_does_not_retry_connect_error_for_post_method(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(httpx.ConnectError):
-            await ingestion_service.fetch_url(
+            await fetching_service.fetch_url(
                 client,
                 "https://example.com",
                 method="POST",
@@ -384,11 +377,9 @@ async def test_fetch_url_does_not_retry_connect_error_for_post_method(
 async def test_fetch_url_does_not_retry_retryable_http_status_for_post_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(5)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(5))
 
     call_count = 0
 
@@ -401,7 +392,7 @@ async def test_fetch_url_does_not_retry_retryable_http_status_for_post_method(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(httpx.HTTPStatusError):
-            await ingestion_service.fetch_url(
+            await fetching_service.fetch_url(
                 client,
                 "https://example.com",
                 method="POST",
@@ -414,11 +405,9 @@ async def test_fetch_url_does_not_retry_retryable_http_status_for_post_method(
 async def test_fetch_url_emits_retry_observability_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
-    monkeypatch.setattr(ingestion_service.fetch_url.retry, "wait", wait_none())
-    monkeypatch.setattr(
-        ingestion_service.fetch_url.retry, "stop", stop_after_attempt(2)
-    )
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "wait", wait_none())
+    monkeypatch.setattr(fetching_service.fetch_url.retry, "stop", stop_after_attempt(2))
 
     warning_calls: list[dict[str, object]] = []
 
@@ -436,9 +425,9 @@ async def test_fetch_url_emits_retry_observability_signals(
         def inc(self) -> None:
             retry_metric_calls.append(dict(self._labels))
 
-    monkeypatch.setattr(ingestion_service, "logger", _FakeLogger())
+    monkeypatch.setattr(fetching_service, "logger", _FakeLogger())
     monkeypatch.setattr(
-        ingestion_service,
+        fetching_service,
         "INGESTION_URL_RETRY_TOTAL",
         _FakeRetryCounter(),
     )
@@ -450,7 +439,7 @@ async def test_fetch_url_emits_retry_observability_signals(
 
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(httpx.ConnectError):
-            await ingestion_service.fetch_url(client, "https://example.com")
+            await fetching_service.fetch_url(client, "https://example.com")
 
     assert warning_calls
     assert warning_calls[0]["url"] == "https://example.com"
@@ -460,12 +449,12 @@ async def test_fetch_url_emits_retry_observability_signals(
 
 
 def test_get_retry_after_seconds_parses_delta_seconds() -> None:
-    result = ingestion_service.get_retry_after_seconds("3")
+    result = fetching_service.get_retry_after_seconds("3")
     assert result == 3.0
 
 
 def test_get_retry_after_seconds_returns_none_for_invalid_value() -> None:
-    result = ingestion_service.get_retry_after_seconds("not-a-valid-header")
+    result = fetching_service.get_retry_after_seconds("not-a-valid-header")
     assert result is None
 
 
@@ -490,7 +479,7 @@ def test_get_retry_wait_seconds_uses_retry_after_for_429() -> None:
         kwargs={"app_settings": runtime_settings},
     )
 
-    result = ingestion_service.get_retry_wait_seconds(retry_state)
+    result = fetching_service.get_retry_wait_seconds(retry_state)
 
     assert result == runtime_settings.retry_backoff_max_seconds
 
@@ -518,12 +507,12 @@ def test_get_retry_wait_seconds_falls_back_when_retry_after_invalid(
     )
 
     monkeypatch.setattr(
-        ingestion_service,
+        fetching_service,
         "get_default_retry_wait_seconds",
         lambda _state: 1.23,
     )
 
-    result = ingestion_service.get_retry_wait_seconds(retry_state)
+    result = fetching_service.get_retry_wait_seconds(retry_state)
 
     assert result == 1.23
 
@@ -553,16 +542,16 @@ def test_should_stop_retry_uses_app_scoped_attempt_and_time_budgets() -> None:
         seconds_since_start=2.0,
     )
 
-    assert ingestion_service.should_stop_retry(active_state) is False
-    assert ingestion_service.should_stop_retry(attempts_exhausted_state) is True
-    assert ingestion_service.should_stop_retry(time_exhausted_state) is True
+    assert fetching_service.should_stop_retry(active_state) is False
+    assert fetching_service.should_stop_retry(attempts_exhausted_state) is True
+    assert fetching_service.should_stop_retry(time_exhausted_state) is True
 
 
 @pytest.mark.asyncio
 async def test_fetch_url_uses_pinned_ip_and_hostname_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
 
     seen_request: dict[str, object] = {}
 
@@ -575,7 +564,7 @@ async def test_fetch_url_uses_pinned_ip_and_hostname_headers(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(client, "https://example.com")
+        response = await fetching_service.fetch_url(client, "https://example.com")
 
     assert response.status_code == 200
     assert seen_request["url_host"] == "93.184.216.34"
@@ -597,7 +586,7 @@ async def test_fetch_url_resolves_relative_redirect_against_hostname(
         return await _allow_all_urls(url, settings)
 
     monkeypatch.setattr(
-        ingestion_service,
+        fetching_service,
         "validate_url_is_safe",
         _validate_and_capture,
     )
@@ -619,7 +608,7 @@ async def test_fetch_url_resolves_relative_redirect_against_hostname(
     transport = httpx.MockTransport(handler)
 
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await ingestion_service.fetch_url(
+        response = await fetching_service.fetch_url(
             client,
             "https://example.com/start",
         )
@@ -869,7 +858,7 @@ async def test_preview_url_maps_asyncio_timeout_to_504(
 async def test_fetch_url_limits_same_host_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(
         host_max_concurrency=2,
         host_limiter_cache_size=1024,
@@ -930,7 +919,7 @@ async def test_fetch_url_limits_same_host_concurrency(
     urls = [f"https://example.com/item-{i}" for i in range(6)]
     await asyncio.gather(
         *(
-            ingestion_service.fetch_url(
+            fetching_service.fetch_url(
                 client,
                 url,
                 app_settings=runtime_settings,
@@ -946,7 +935,7 @@ async def test_fetch_url_limits_same_host_concurrency(
 async def test_fetch_url_allows_parallelism_across_different_hosts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ingestion_service, "validate_url_is_safe", _allow_all_urls)
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
     runtime_settings = Settings(
         host_max_concurrency=1,
         host_limiter_cache_size=1024,
@@ -1018,7 +1007,7 @@ async def test_fetch_url_allows_parallelism_across_different_hosts(
     ]
     await asyncio.gather(
         *(
-            ingestion_service.fetch_url(
+            fetching_service.fetch_url(
                 client,
                 url,
                 app_settings=runtime_settings,
