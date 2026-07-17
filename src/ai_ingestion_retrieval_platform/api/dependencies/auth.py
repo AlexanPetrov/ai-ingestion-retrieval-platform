@@ -1,7 +1,7 @@
 """Authentication dependency for protected ingestion routes."""
 
 import secrets
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -27,7 +27,7 @@ BearerCredentialsDependency = Annotated[
 ]
 
 
-def _raise_unauthorized() -> None:
+def _raise_unauthorized() -> NoReturn:
     raise HTTPException(
         status_code=401,
         detail=AUTHENTICATION_REQUIRED_DETAIL,

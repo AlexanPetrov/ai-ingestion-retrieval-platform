@@ -140,6 +140,7 @@ brew services stop redis
 
 ```bash
 uv run pytest
+uv run pyright
 ```
 
 ## Status

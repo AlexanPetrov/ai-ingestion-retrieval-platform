@@ -1,7 +1,7 @@
 """Outbound URL fetching with safety checks, retries, and byte caps."""
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import perf_counter
 
@@ -161,9 +161,9 @@ def get_retry_after_seconds(retry_after_header: str) -> float | None:
         return None
 
     if retry_after_datetime.tzinfo is None:
-        retry_after_datetime = retry_after_datetime.replace(tzinfo=datetime.UTC)
+        retry_after_datetime = retry_after_datetime.replace(tzinfo=UTC)
 
-    now_utc = datetime.now(datetime.UTC)
+    now_utc = datetime.now(UTC)
     return max(0.0, (retry_after_datetime - now_utc).total_seconds())
 
 
