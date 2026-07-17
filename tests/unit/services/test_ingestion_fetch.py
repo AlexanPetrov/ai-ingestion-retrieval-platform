@@ -9,6 +9,9 @@ from fastapi import HTTPException
 from tenacity import stop_after_attempt, wait_none
 
 from ai_ingestion_retrieval_platform.core.config import Settings
+from ai_ingestion_retrieval_platform.core.content_sniffing import (
+    ERROR_CONTENT_BYTES_MISMATCH,
+)
 from ai_ingestion_retrieval_platform.core.limits import clear_limiters
 from ai_ingestion_retrieval_platform.core.response_admission import (
     ERROR_CONTENT_TYPE_MISSING,
@@ -245,15 +248,16 @@ async def test_fetch_url_accepts_parameterized_supported_content_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    html_body = b"<html>ok</html>"
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             status_code=200,
             headers={
-                "content-length": "2",
+                "content-length": str(len(html_body)),
                 "content-type": "Text/HTML; charset=UTF-8",
             },
-            content=b"ok",
+            content=html_body,
             request=request,
         )
 
@@ -267,7 +271,40 @@ async def test_fetch_url_accepts_parameterized_supported_content_type(
         )
 
     assert response.status_code == 200
-    assert response.content == b"ok"
+    assert response.content == html_body
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_rejects_content_type_byte_mismatch_after_body_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetching_service, "validate_url_is_safe", _allow_all_urls)
+    stream = _TrackingAsyncByteStream(b"plain text only")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={
+                "content-length": str(len(stream.content)),
+                "content-type": "text/html",
+            },
+            stream=stream,
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await fetching_service.fetch_url(
+                client,
+                "https://example.com",
+                allowed_content_types=("text/html",),
+            )
+
+    assert exc_info.value.status_code == 415
+    assert exc_info.value.detail == ERROR_CONTENT_BYTES_MISMATCH
+    assert stream.was_iterated is True
 
 
 @pytest.mark.asyncio

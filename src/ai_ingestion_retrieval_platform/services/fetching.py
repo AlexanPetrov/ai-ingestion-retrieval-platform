@@ -16,6 +16,9 @@ from tenacity import (
 )
 
 from ai_ingestion_retrieval_platform.core.config import Settings
+from ai_ingestion_retrieval_platform.core.content_sniffing import (
+    validate_content_matches_declared_type,
+)
 from ai_ingestion_retrieval_platform.core.limits import (
     get_host_limiter,
     get_outbound_fetch_limiter,
@@ -280,7 +283,15 @@ async def fetch_url(
 
                             body.extend(chunk[:remaining])
 
-                        response._content = bytes(body)
+                        response_body = bytes(body)
+
+                        if allowed_content_types is not None:
+                            validate_content_matches_declared_type(
+                                response_body,
+                                response.headers.get("content-type"),
+                            )
+
+                        response._content = response_body
                         return response
 
                     finally:
