@@ -1,6 +1,6 @@
 """FastAPI app factory, lifespan wiring, and router registration."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -27,7 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings = get_settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         configure_logging(settings)
 
         client_timeout = httpx.Timeout(
