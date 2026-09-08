@@ -13,9 +13,15 @@ class UrlIngestionRequest(BaseModel):
 class BatchUrlIngestionRequest(BaseModel):
     urls: list[AnyHttpUrl] = Field(
         min_length=1,
-        examples=[["https://example.com", "https://httpbin.org/html"]],
+        examples=[
+            [
+                "https://example.com",
+                "https://httpbin.org/html",
+            ]
+        ],
         description="Public URLs to fetch for ingestion preview.",
     )
+
     max_concurrency: int | None = Field(
         default=None,
         ge=1,

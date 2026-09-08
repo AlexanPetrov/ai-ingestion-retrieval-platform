@@ -24,7 +24,12 @@ class RequestLoggingMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -36,8 +41,15 @@ class RequestLoggingMiddleware:
         start = perf_counter()
         status_code = 500
 
+        # Make the correlation ID available to downstream Starlette/FastAPI
+        # code through request.state.request_id.
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+
         structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(request_id=request_id)
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id,
+        )
 
         if not is_health_check:
             logger.info(
@@ -51,19 +63,42 @@ class RequestLoggingMiddleware:
 
             if message["type"] == "http.response.start":
                 status_code = message["status"]
-                headers = list(message.get("headers", []))
-                headers.append((b"x-request-id", request_id.encode()))
+
+                headers = list(
+                    message.get(
+                        "headers",
+                        [],
+                    )
+                )
+
+                headers.append(
+                    (
+                        b"x-request-id",
+                        request_id.encode(),
+                    )
+                )
+
                 message["headers"] = headers
 
             await send(message)
 
         try:
-            await self.app(scope, receive, send_wrapper)
+            await self.app(
+                scope,
+                receive,
+                send_wrapper,
+            )
 
         except Exception:
             elapsed_seconds = perf_counter() - start
-            elapsed_ms = round(elapsed_seconds * 1000, 2)
-            metric_path = self._get_metric_path(scope, raw_path)
+            elapsed_ms = round(
+                elapsed_seconds * 1000,
+                2,
+            )
+            metric_path = self._get_metric_path(
+                scope,
+                raw_path,
+            )
 
             HTTP_REQUESTS_TOTAL.labels(
                 method=method,
@@ -84,11 +119,18 @@ class RequestLoggingMiddleware:
                 status_code=500,
                 elapsed_ms=elapsed_ms,
             )
+
             raise
 
         elapsed_seconds = perf_counter() - start
-        elapsed_ms = round(elapsed_seconds * 1000, 2)
-        metric_path = self._get_metric_path(scope, raw_path)
+        elapsed_ms = round(
+            elapsed_seconds * 1000,
+            2,
+        )
+        metric_path = self._get_metric_path(
+            scope,
+            raw_path,
+        )
 
         HTTP_REQUESTS_TOTAL.labels(
             method=method,
@@ -111,20 +153,42 @@ class RequestLoggingMiddleware:
                 elapsed_ms=elapsed_ms,
             )
 
-    def _get_request_id(self, scope: Scope) -> str:
-        headers = dict(scope.get("headers", []))
-        request_id = headers.get(b"x-request-id")
+    def _get_request_id(
+        self,
+        scope: Scope,
+    ) -> str:
+        headers = dict(
+            scope.get(
+                "headers",
+                [],
+            )
+        )
+
+        request_id = headers.get(
+            b"x-request-id",
+        )
 
         if request_id:
             return request_id.decode()
 
         return str(uuid4())
 
-    def _get_metric_path(self, scope: Scope, fallback_path: str) -> str:
+    def _get_metric_path(
+        self,
+        scope: Scope,
+        fallback_path: str,
+    ) -> str:
         route = scope.get("route")
-        route_path = getattr(route, "path", None)
+        route_path = getattr(
+            route,
+            "path",
+            None,
+        )
 
-        if isinstance(route_path, str):
+        if isinstance(
+            route_path,
+            str,
+        ):
             return route_path
 
         return fallback_path
