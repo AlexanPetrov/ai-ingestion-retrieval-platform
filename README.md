@@ -1,14 +1,16 @@
 # AI Ingestion & Retrieval Platform
 
-Production-grade asynchronous ingestion platform built with FastAPI, secure outbound I/O, bounded parser execution, PostgreSQL persistence, Alembic migrations, authentication, rate limiting, and operational observability.
+Production-grade asynchronous ingestion platform built with FastAPI, secure outbound I/O, bounded parser execution, PostgreSQL persistence, Alembic migrations, authentication, rate limiting, operational observability, and shell-based administrative inspection tooling.
 
-**Current status: Stages 2–3 complete — Persistence Design & Implementation**
+**Current status: Stage 3.5 in progress — Production Hardening / Operationalization**
 
-The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, parsing, transaction handling, persistence, schema migration, readiness behavior, and real PostgreSQL integration testing are implemented.
+Stages 1–3 are complete. The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, parsing, transaction handling, persistence, schema migration, readiness behavior, real PostgreSQL integration testing, and a read-only administrative CLI are implemented.
 
-**Next: Stage 4 — Indexing and Retrieval**
+The administrative CLI currently supports inspection only. Destructive administrative operations such as ingestion deletion, source deletion, and database purge are **not implemented yet**.
 
-Document chunking, embeddings, pgvector storage, vector similarity search, and retrieval APIs are planned but are **not implemented yet**.
+**Next Stage 3.5 work: deletion lifecycle and remaining persistence operational hardening.**
+
+**Stage 4 — Indexing and Retrieval** remains planned but is **not implemented yet**.
 
 ---
 
@@ -17,6 +19,7 @@ Document chunking, embeddings, pgvector storage, vector similarity search, and r
 - [Implemented Scope](#implemented-scope)
 - [Architecture](#architecture)
 - [API Surface](#api-surface)
+- [Administrative CLI](#administrative-cli)
 - [Persistence Model](#persistence-model)
 - [Runtime Behavior](#runtime-behavior)
 - [Technology Stack](#technology-stack)
@@ -76,6 +79,34 @@ Document chunking, embeddings, pgvector storage, vector similarity search, and r
 - Transaction rollback semantics
 - Database-level constraints and referential integrity
 
+### Administrative inspection
+
+- Internal shell-only `ai-irp-admin` CLI
+- Database entity counts
+- Source listing
+- Source detail lookup by UUID
+- Ingestion-record listing
+- Ingestion-record detail lookup by UUID
+- Parsed-document listing
+- Parsed-document detail lookup by UUID
+- Full persisted parsed text available through document detail inspection
+- Shared administrative list-limit validation
+- UUID validation and normalization
+- Explicit not-found handling
+- Database-disabled handling
+- Repository/service/CLI separation for administrative reads
+
+The administrative tooling is currently **read-only**.
+
+The following administrative write operations are **not implemented yet**:
+
+- ingestion deletion
+- source deletion
+- database purge
+- other administrative mutation commands
+
+An independent parsed-document delete command is not planned for the initial deletion lifecycle. Parsed-document lifecycle belongs to the owning ingestion record.
+
 ### Security and operations
 
 - Optional Bearer authentication for ingestion routes
@@ -95,6 +126,7 @@ Document chunking, embeddings, pgvector storage, vector similarity search, and r
 - API integration tests
 - Application lifespan integration tests
 - Real PostgreSQL integration tests
+- Administrative repository/service/CLI tests
 - Coverage enforcement
 - Alembic model/schema drift detection
 - Performance baseline tests
@@ -103,7 +135,7 @@ Document chunking, embeddings, pgvector storage, vector similarity search, and r
 
 ## Architecture
 
-The application separates inbound API concerns, secure outbound fetching, parser execution, persistence, and infrastructure lifecycle.
+The application separates inbound API concerns, secure outbound fetching, parser execution, persistence, administrative inspection, and infrastructure lifecycle.
 
 ```text
 Client
@@ -144,6 +176,29 @@ Ingestion orchestration
          +--> asyncpg
          +--> PostgreSQL
 ```
+
+Administrative inspection uses a separate shell-only path:
+
+```text
+Operator
+  |
+  v
+ai-irp-admin
+  |
+  v
+administrative service
+  |
+  v
+administrative repository
+  |
+  v
+SQLAlchemy asyncio / asyncpg
+  |
+  v
+PostgreSQL
+```
+
+The administrative CLI is intentionally not exposed as an HTTP administration API and does not appear in Swagger.
 
 Preview routes stop after shaping the bounded response.
 
@@ -208,6 +263,202 @@ Swagger UI is available locally at:
 
 ```text
 http://127.0.0.1:8000/docs
+```
+
+There is currently **no HTTP administration API**. Administrative inspection is shell-only through `ai-irp-admin`.
+
+---
+
+## Administrative CLI
+
+The project installs an internal administrative command:
+
+```bash
+ai-irp-admin
+```
+
+The command is registered through:
+
+```toml
+[project.scripts]
+ai-irp-admin = "ai_ingestion_retrieval_platform.admin_cli:main"
+```
+
+The current command surface is:
+
+```text
+ai-irp-admin
+├── sources
+│   ├── list [--limit N]
+│   └── show <uuid>
+├── ingestions
+│   ├── list [--limit N]
+│   └── show <uuid>
+├── documents
+│   ├── list [--limit N]
+│   └── show <uuid>
+└── database
+    └── stats
+```
+
+### Read-only status
+
+The administrative CLI currently performs **inspection only**.
+
+It does not currently provide:
+
+```text
+sources delete
+ingestions delete
+database purge
+```
+
+Those operations belong to the upcoming deletion lifecycle and must preserve the existing database referential-integrity rules.
+
+There is no independent parsed-document delete command in the current design.
+
+### Database statistics
+
+```bash
+uv run ai-irp-admin database stats
+```
+
+Example output shape:
+
+```text
+Database statistics
+Sources:           10
+Ingestion records: 25
+Parsed documents:  18
+```
+
+### List sources
+
+```bash
+uv run ai-irp-admin sources list
+uv run ai-irp-admin sources list --limit 10
+```
+
+The default list limit is `50`. Valid administrative limits are `1..500`.
+
+### Show a source
+
+```bash
+uv run ai-irp-admin sources show <source-uuid>
+```
+
+The command displays:
+
+- source ID
+- URL
+- creation timestamp
+- last-seen timestamp
+
+### List ingestion records
+
+```bash
+uv run ai-irp-admin ingestions list
+uv run ai-irp-admin ingestions list --limit 10
+```
+
+The list view displays:
+
+- ingestion-record ID
+- source ID
+- ingestion mode
+- batch ID
+- batch position
+- ingestion timestamp
+
+### Show an ingestion record
+
+```bash
+uv run ai-irp-admin ingestions show <ingestion-uuid>
+```
+
+The detail view exposes the persisted audit fields available for the ingestion, including:
+
+- ingestion-record ID
+- source ID
+- linked parsed-document ID when present
+- ingestion mode
+- batch correlation
+- request ID
+- client IP
+- HTTP status and reason
+- final URL field
+- response content metadata
+- fetch timing and error metadata
+- retry-attempt field
+- fetched timestamp
+- parser name/version fields
+- parse timing and error metadata
+- ingestion timestamp
+
+The CLI reports actual persisted values. It does not fabricate values for metadata that upstream contracts do not yet supply authoritatively.
+
+### List parsed documents
+
+```bash
+uv run ai-irp-admin documents list
+uv run ai-irp-admin documents list --limit 10
+```
+
+The list view deliberately returns metadata only:
+
+- parsed-document ID
+- owning ingestion-record ID
+- content type
+- character length
+- creation timestamp
+
+Full stored text is intentionally omitted from list output.
+
+### Show a parsed document
+
+```bash
+uv run ai-irp-admin documents show <document-uuid>
+```
+
+The detail view displays:
+
+- parsed-document ID
+- owning ingestion-record ID
+- content type
+- character length
+- creation timestamp
+- full persisted bounded `text_content`
+
+The administrative repository returns stored text unchanged. Presentation-level truncation or paging is not currently implemented.
+
+### Administrative error behavior
+
+Invalid UUID input returns a usage-style administrative error and exit code `2`.
+
+Example:
+
+```text
+ai-irp-admin: Invalid document ID 'not-a-uuid'; expected a UUID.
+```
+
+A valid but missing UUID also returns exit code `2`.
+
+Example:
+
+```text
+ai-irp-admin: Document 123e4567-e89b-12d3-a456-426614174002 was not found.
+```
+
+Invalid list limits return:
+
+```text
+ai-irp-admin: Limit must be between 1 and 500.
+```
+
+Administrative database operations require:
+
+```dotenv
+DATABASE_ENABLED=true
 ```
 
 ---
@@ -296,6 +547,8 @@ PostgreSQL constraints enforce important persistence semantics, including:
 - restricted source deletion while ingestion history exists
 - parsed-document cascade when its ingestion record is deleted
 
+These deletion semantics are already enforced by the schema even though administrative delete commands have not yet been exposed.
+
 ---
 
 ## Runtime Behavior
@@ -379,6 +632,8 @@ The fetch and parser work occur before the short persistence transaction.
 
 For batch persisted ingestion, each URL is processed with its own database session/transaction. This allows partial success: one URL failing does not roll back successful URLs from the same batch request.
 
+Administrative read operations use short-lived async SQLAlchemy resources and close their database engine after the operation.
+
 ### Failure Semantics
 
 The persistence layer deliberately distinguishes ingestion failures from persistence failures.
@@ -420,6 +675,8 @@ The following fields are intentionally not populated with invented values:
 - parser version
 
 Until those contracts are extended, the persistence layer keeps these values unset/defaulted rather than presenting guessed metadata as factual audit data.
+
+The administrative CLI follows the same rule and displays the actual persisted value, including unset/default values where appropriate.
 
 ---
 
@@ -483,7 +740,7 @@ cp .env.example .env
 
 Edit `.env` for the local environment.
 
-Do not commit real credentials, tokens, or database passwords.
+Do not commit real credentials, tokens, database passwords, or local shell environment files containing secrets.
 
 ### 4. Start Redis when rate limiting is enabled
 
@@ -528,7 +785,7 @@ The application does **not** create tables automatically on startup.
 ### 6. Run the API
 
 ```bash
-uv run uvicorn ai_ingestion_retrieval_platform.main:create_app --factory --reload
+uv run uvicorn   ai_ingestion_retrieval_platform.main:create_app   --factory   --reload
 ```
 
 Open Swagger UI:
@@ -537,7 +794,28 @@ Open Swagger UI:
 http://127.0.0.1:8000/docs
 ```
 
-### 7. Check health
+### 7. Use the administrative CLI
+
+With persistence enabled and the database available:
+
+```bash
+uv run ai-irp-admin database stats
+uv run ai-irp-admin sources list
+uv run ai-irp-admin ingestions list
+uv run ai-irp-admin documents list
+```
+
+Inspect individual records with:
+
+```bash
+uv run ai-irp-admin sources show <source-uuid>
+uv run ai-irp-admin ingestions show <ingestion-uuid>
+uv run ai-irp-admin documents show <document-uuid>
+```
+
+The administrative CLI is currently read-only.
+
+### 8. Check health
 
 ```bash
 curl http://127.0.0.1:8000/health/live
@@ -791,9 +1069,7 @@ METRICS_TOKEN=<strong-secret>
 Query it with:
 
 ```bash
-curl \
-  -H "Authorization: Bearer <strong-secret>" \
-  http://127.0.0.1:8000/metrics
+curl   -H "Authorization: Bearer <strong-secret>"   http://127.0.0.1:8000/metrics
 ```
 
 Metrics include:
@@ -815,6 +1091,8 @@ Metrics include:
 - extracted character counts
 
 Request metric paths are normalized to avoid high-cardinality labels.
+
+Persistence-specific administrative metrics are not yet implemented.
 
 ---
 
@@ -878,12 +1156,53 @@ The normal suite covers:
 - request logging
 - persistence engine configuration
 - repositories
+- administrative repository behavior
 - persistence schemas
 - persistence service behavior
+- administrative service behavior
+- administrative CLI behavior
 - API routes
 - health routes
 - application lifespan
 - performance baselines
+
+### Administrative CLI verification
+
+Administrative read tooling is tested at each layer:
+
+```text
+CLI
+  |
+  v
+administrative service
+  |
+  v
+administrative repository
+```
+
+Current focused test counts:
+
+```text
+Admin repository: 15 passed
+Admin service:    40 passed
+Admin CLI:        31 passed
+```
+
+The focused tests verify:
+
+- list behavior
+- default and explicit limits
+- empty-database behavior
+- UUID normalization
+- invalid UUID handling
+- not-found handling
+- database-disabled handling
+- engine cleanup
+- repository failure propagation
+- source detail output
+- ingestion audit detail output
+- parsed-document metadata output
+- full parsed-document text output
 
 ### Real PostgreSQL integration tests
 
@@ -963,9 +1282,7 @@ uv run pytest
 ### Running the PostgreSQL integration layer explicitly
 
 ```bash
-uv run pytest \
-  tests/integration/persistence/test_postgres_persistence.py \
-  --no-cov -v
+uv run pytest   tests/integration/persistence/test_postgres_persistence.py   --no-cov -v
 ```
 
 ### Full verification gate
@@ -983,11 +1300,12 @@ uv run alembic check
 Current verified baseline:
 
 ```text
-259 passed
-95.67% total test coverage
+345 passed
+96.30% total test coverage
 Ruff clean
-Pyright: 0 errors, 0 warnings
-Persistence service coverage: 100%
+Pyright: 0 errors, 0 warnings, 0 informations
+Administrative repository coverage: 100%
+Administrative service coverage: 100%
 Alembic check: No new upgrade operations detected.
 ```
 
@@ -1003,13 +1321,12 @@ Coverage is treated as a gate, not as a substitute for behavioral integration te
 
 ## Project Structure
 
-Generated `__pycache__` directories and local editor/runtime artifacts are omitted below.
+Generated `__pycache__` directories, compiled Python files, and personal/local artifacts are omitted.
 
 ```text
 .
 ├── alembic/
 │   ├── env.py
-│   ├── README
 │   ├── script.py.mako
 │   └── versions/
 │       └── 4eb7669e862c_create_ingestion_persistence_schema.py
@@ -1020,6 +1337,7 @@ Generated `__pycache__` directories and local editor/runtime artifacts are omitt
 ├── src/
 │   └── ai_ingestion_retrieval_platform/
 │       ├── __init__.py
+│       ├── admin_cli.py
 │       ├── main.py
 │       ├── api/
 │       │   ├── __init__.py
@@ -1049,6 +1367,7 @@ Generated `__pycache__` directories and local editor/runtime artifacts are omitt
 │       │   └── request_logging.py
 │       ├── persistence/
 │       │   ├── __init__.py
+│       │   ├── admin_repository.py
 │       │   ├── engine.py
 │       │   ├── models.py
 │       │   └── repositories.py
@@ -1059,6 +1378,7 @@ Generated `__pycache__` directories and local editor/runtime artifacts are omitt
 │       │   └── persistence.py
 │       └── services/
 │           ├── __init__.py
+│           ├── admin.py
 │           ├── fetching.py
 │           ├── ingestion.py
 │           ├── parsing.py
@@ -1097,16 +1417,19 @@ Generated `__pycache__` directories and local editor/runtime artifacts are omitt
 │       ├── middleware/
 │       │   └── test_request_logging.py
 │       ├── persistence/
+│       │   ├── test_admin_repository.py
 │       │   ├── test_engine.py
 │       │   └── test_repositories.py
 │       ├── schemas/
 │       │   └── test_persistence_schemas.py
-│       └── services/
-│           ├── test_ingestion_batch.py
-│           ├── test_ingestion_errors.py
-│           ├── test_ingestion_fetch.py
-│           ├── test_parsing.py
-│           └── test_persistence_service.py
+│       ├── services/
+│       │   ├── test_admin.py
+│       │   ├── test_ingestion_batch.py
+│       │   ├── test_ingestion_errors.py
+│       │   ├── test_ingestion_fetch.py
+│       │   ├── test_parsing.py
+│       │   └── test_persistence_service.py
+│       └── test_admin_cli.py
 └── uv.lock
 ```
 
@@ -1115,12 +1438,14 @@ Generated `__pycache__` directories and local editor/runtime artifacts are omitt
 - `api/` — HTTP transport, dependencies, and route contracts
 - `core/` — configuration, limits, URL safety, and observability primitives
 - `middleware/` — request lifecycle logging and request ID propagation
-- `persistence/` — SQLAlchemy engine, models, and repository layer
+- `persistence/` — SQLAlchemy engine, models, ingestion repository, and administrative read repository
 - `schemas/` — request/response and persistence schema validation
 - `services/fetching.py` — secure outbound fetch boundary
 - `services/parsing.py` — bounded parser boundary
 - `services/ingestion.py` — preview ingestion orchestration
 - `services/persistence.py` — durable ingestion orchestration and transaction ownership
+- `services/admin.py` — administrative validation and read orchestration
+- `admin_cli.py` — shell-only administrative command surface
 - `alembic/` — schema migration environment and revisions
 - `tests/integration/persistence/` — real PostgreSQL behavioral verification
 
@@ -1152,6 +1477,12 @@ uv run pyright
 uv run pytest
 ```
 
+For focused unit work where global coverage reporting is unnecessary:
+
+```bash
+uv run pytest --no-cov <test-path>
+```
+
 ### Migration drift check
 
 ```bash
@@ -1170,13 +1501,14 @@ uv run pytest
 uv run alembic check
 ```
 
-A change is not considered complete solely because unit tests pass. Persistence changes should preserve:
+A change is not considered complete solely because unit tests pass. Persistence and administrative changes should preserve:
 
 - schema/model alignment
 - transaction semantics
 - real PostgreSQL behavior
 - API failure contracts
 - readiness behavior
+- administrative behavior
 - type safety
 - lint/format cleanliness
 
@@ -1239,9 +1571,42 @@ Implemented:
 - real PostgreSQL constraint/transaction integration tests
 - Alembic schema drift verification
 
+### Stage 3.5 — Production Hardening / Operationalization
+
+**In progress**
+
+Implemented:
+
+- internal `ai-irp-admin` command
+- read-only database statistics
+- read-only source list/detail inspection
+- read-only ingestion list/detail inspection
+- read-only parsed-document list/detail inspection
+- administrative UUID validation
+- administrative not-found behavior
+- administrative database-disabled behavior
+- focused repository/service/CLI coverage
+- production verification baseline after administrative read tooling
+
+Planned remaining work:
+
+- deletion lifecycle
+  - ingestion deletion
+  - parsed-document cascade verification through admin operations
+  - source deletion rules
+  - explicit destructive-operation confirmations
+- database purge command with explicit confirmation
+- parsed-content hash/version semantics
+- authoritative parser identity/version propagation
+- persistence-specific metrics
+- additional architecture and operations documentation
+- final hardening verification before Stage 4
+
+Administrative destructive operations must not bypass the existing persistence invariants.
+
 ### Stage 4 — Indexing and Retrieval
 
-**Next — not implemented**
+**Planned — not implemented**
 
 Planned work:
 
@@ -1275,4 +1640,4 @@ The following are intentionally deferred until deployment scale or additional se
 - database migration deployment automation
 - horizontal worker/queue architecture
 
-These are deployment and scale concerns, not substitutes for the correctness and safety boundaries already implemented in the ingestion and persistence layers.
+These are deployment and scale concerns, not substitutes for the correctness and safety boundaries already implemented in the ingestion, persistence, and administrative layers.

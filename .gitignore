@@ -16,6 +16,7 @@ wheels/
 
 # Personal/local files
 *.pages
+.envrc
 
 # Testing/cache
 .coverage
