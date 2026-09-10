@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
+
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.persistence.admin_repository import (
     AdminRepository,
+    DatabasePurgeResult,
     DatabaseStats,
     IngestionDetail,
     IngestionSummary,
@@ -19,6 +22,8 @@ from ai_ingestion_retrieval_platform.persistence.engine import (
     create_database_engine,
     get_session_factory,
 )
+
+_FOREIGN_KEY_VIOLATION_SQLSTATE = "23503"
 
 
 class DatabaseNotEnabledError(RuntimeError):
@@ -37,6 +42,10 @@ class SourceNotFoundError(LookupError):
     """Raised when a requested source does not exist."""
 
 
+class SourceDeletionRestrictedError(RuntimeError):
+    """Raised when ingestion history prevents deletion of a source."""
+
+
 class InvalidIngestionIdError(ValueError):
     """Raised when an ingestion ID is not a valid UUID."""
 
@@ -51,6 +60,40 @@ class InvalidDocumentIdError(ValueError):
 
 class DocumentNotFoundError(LookupError):
     """Raised when a requested parsed document does not exist."""
+
+
+class DestructiveOperationNotConfirmedError(ValueError):
+    """Raised when a destructive admin operation lacks confirmation."""
+
+
+def _has_sqlstate(exc: BaseException, sqlstate: str) -> bool:
+    """Return whether an exception chain contains the requested SQLSTATE."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+
+        if current_id in seen:
+            continue
+
+        seen.add(current_id)
+
+        if getattr(current, "sqlstate", None) == sqlstate:
+            return True
+
+        original = getattr(current, "orig", None)
+        if isinstance(original, BaseException):
+            pending.append(original)
+
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    return False
 
 
 def validate_admin_limit(limit: int) -> int:
@@ -115,6 +158,40 @@ async def get_database_stats(settings: Settings) -> DatabaseStats:
         await close_database(engine)
 
 
+async def purge_database(
+    settings: Settings,
+    *,
+    confirmed: bool,
+) -> DatabasePurgeResult:
+    """Delete all persisted application data."""
+    if not settings.database_enabled:
+        raise DatabaseNotEnabledError(
+            "Database persistence is disabled. Set DATABASE_ENABLED=true."
+        )
+
+    if not confirmed:
+        raise DestructiveOperationNotConfirmedError(
+            "Database purge requires explicit confirmation. Re-run with --confirm."
+        )
+
+    engine = create_database_engine(settings)
+    session_factory = get_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            repository = AdminRepository(session)
+
+            try:
+                result = await repository.purge_database()
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+    finally:
+        await close_database(engine)
+
+
 async def list_sources(
     settings: Settings,
     *,
@@ -170,6 +247,60 @@ async def get_source(
         await close_database(engine)
 
 
+async def delete_source(
+    settings: Settings,
+    *,
+    source_id: str,
+    confirmed: bool,
+) -> str:
+    """Delete one persisted source with no remaining ingestion history."""
+    if not settings.database_enabled:
+        raise DatabaseNotEnabledError(
+            "Database persistence is disabled. Set DATABASE_ENABLED=true."
+        )
+
+    validated_source_id = validate_source_id(source_id)
+
+    if not confirmed:
+        raise DestructiveOperationNotConfirmedError(
+            "Source deletion requires explicit confirmation. Re-run with --confirm."
+        )
+
+    engine = create_database_engine(settings)
+    session_factory = get_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            repository = AdminRepository(session)
+
+            try:
+                deleted = await repository.delete_source(validated_source_id)
+
+                if not deleted:
+                    raise SourceNotFoundError(
+                        f"Source {validated_source_id} was not found."
+                    )
+
+                await session.commit()
+
+                return validated_source_id
+            except IntegrityError as exc:
+                await session.rollback()
+
+                if _has_sqlstate(exc, _FOREIGN_KEY_VIOLATION_SQLSTATE):
+                    raise SourceDeletionRestrictedError(
+                        f"Source {validated_source_id} cannot be deleted because "
+                        "ingestion history still references it."
+                    ) from exc
+
+                raise
+            except Exception:
+                await session.rollback()
+                raise
+    finally:
+        await close_database(engine)
+
+
 async def list_ingestions(
     settings: Settings,
     *,
@@ -221,6 +352,53 @@ async def get_ingestion(
                 )
 
             return ingestion
+    finally:
+        await close_database(engine)
+
+
+async def delete_ingestion(
+    settings: Settings,
+    *,
+    ingestion_id: str,
+    confirmed: bool,
+) -> str:
+    """Delete one persisted ingestion record.
+
+    The database cascades deletion to any linked parsed document.
+    """
+    if not settings.database_enabled:
+        raise DatabaseNotEnabledError(
+            "Database persistence is disabled. Set DATABASE_ENABLED=true."
+        )
+
+    validated_ingestion_id = validate_ingestion_id(ingestion_id)
+
+    if not confirmed:
+        raise DestructiveOperationNotConfirmedError(
+            "Ingestion deletion requires explicit confirmation. Re-run with --confirm."
+        )
+
+    engine = create_database_engine(settings)
+    session_factory = get_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            repository = AdminRepository(session)
+
+            try:
+                deleted = await repository.delete_ingestion(validated_ingestion_id)
+
+                if not deleted:
+                    raise IngestionNotFoundError(
+                        f"Ingestion {validated_ingestion_id} was not found."
+                    )
+
+                await session.commit()
+
+                return validated_ingestion_id
+            except Exception:
+                await session.rollback()
+                raise
     finally:
         await close_database(engine)
 

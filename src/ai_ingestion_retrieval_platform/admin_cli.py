@@ -17,13 +17,17 @@ from ai_ingestion_retrieval_platform.persistence.admin_repository import (
 )
 from ai_ingestion_retrieval_platform.services.admin import (
     DatabaseNotEnabledError,
+    DestructiveOperationNotConfirmedError,
     DocumentNotFoundError,
     IngestionNotFoundError,
     InvalidAdminLimitError,
     InvalidDocumentIdError,
     InvalidIngestionIdError,
     InvalidSourceIdError,
+    SourceDeletionRestrictedError,
     SourceNotFoundError,
+    delete_ingestion,
+    delete_source,
     get_database_stats,
     get_document,
     get_ingestion,
@@ -31,6 +35,7 @@ from ai_ingestion_retrieval_platform.services.admin import (
     list_documents,
     list_ingestions,
     list_sources,
+    purge_database,
 )
 
 
@@ -48,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sources_parser = subparsers.add_parser(
         "sources",
-        help="Inspect persisted sources.",
+        help="Inspect and manage persisted sources.",
     )
 
     sources_subparsers = sources_parser.add_subparsers(
@@ -76,9 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="UUID of the source to show.",
     )
 
+    sources_delete_parser = sources_subparsers.add_parser(
+        "delete",
+        help="Delete one persisted source.",
+    )
+    sources_delete_parser.add_argument(
+        "source_id",
+        help="UUID of the source to delete.",
+    )
+    sources_delete_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm the destructive deletion.",
+    )
+
     ingestions_parser = subparsers.add_parser(
         "ingestions",
-        help="Inspect ingestion records.",
+        help="Inspect and manage ingestion records.",
     )
 
     ingestions_subparsers = ingestions_parser.add_subparsers(
@@ -106,6 +125,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingestions_show_parser.add_argument(
         "ingestion_id",
         help="UUID of the ingestion record to show.",
+    )
+
+    ingestions_delete_parser = ingestions_subparsers.add_parser(
+        "delete",
+        help="Delete one persisted ingestion record.",
+    )
+    ingestions_delete_parser.add_argument(
+        "ingestion_id",
+        help="UUID of the ingestion record to delete.",
+    )
+    ingestions_delete_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm the destructive deletion.",
     )
 
     documents_parser = subparsers.add_parser(
@@ -155,6 +188,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show persisted entity counts.",
     )
 
+    database_purge_parser = database_subparsers.add_parser(
+        "purge",
+        help="Delete all persisted application data.",
+    )
+    database_purge_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm the destructive purge.",
+    )
+
     return parser
 
 
@@ -167,6 +210,23 @@ async def _show_database_stats() -> int:
     print(f"Sources:           {stats.sources}")
     print(f"Ingestion records: {stats.ingestion_records}")
     print(f"Parsed documents:  {stats.parsed_documents}")
+
+    return 0
+
+
+async def _purge_database(*, confirmed: bool) -> int:
+    """Delete all persisted application data."""
+    settings = Settings()
+
+    result = await purge_database(
+        settings,
+        confirmed=confirmed,
+    )
+
+    print("Database purge complete")
+    print(f"Sources deleted:           {result.sources_deleted}")
+    print(f"Ingestion records deleted: {result.ingestion_records_deleted}")
+    print(f"Parsed documents deleted:  {result.parsed_documents_deleted}")
 
     return 0
 
@@ -212,6 +272,25 @@ async def _show_source(*, source_id: str) -> int:
 
     print("Source")
     _print_source(source)
+
+    return 0
+
+
+async def _delete_source(
+    *,
+    source_id: str,
+    confirmed: bool,
+) -> int:
+    """Delete one persisted source."""
+    settings = Settings()
+
+    deleted_source_id = await delete_source(
+        settings,
+        source_id=source_id,
+        confirmed=confirmed,
+    )
+
+    print(f"Deleted source {deleted_source_id}.")
 
     return 0
 
@@ -308,6 +387,25 @@ async def _show_ingestion(*, ingestion_id: str) -> int:
     return 0
 
 
+async def _delete_ingestion(
+    *,
+    ingestion_id: str,
+    confirmed: bool,
+) -> int:
+    """Delete one persisted ingestion record."""
+    settings = Settings()
+
+    deleted_ingestion_id = await delete_ingestion(
+        settings,
+        ingestion_id=ingestion_id,
+        confirmed=confirmed,
+    )
+
+    print(f"Deleted ingestion {deleted_ingestion_id}.")
+
+    return 0
+
+
 def _print_document(document: ParsedDocumentSummary) -> None:
     """Print one parsed-document summary."""
     print(f"ID:                  {document.id}")
@@ -372,8 +470,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.command == "database" and args.database_command == "stats":
-            return asyncio.run(_show_database_stats())
+        if args.command == "database":
+            if args.database_command == "stats":
+                return asyncio.run(_show_database_stats())
+
+            if args.database_command == "purge":
+                return asyncio.run(
+                    _purge_database(
+                        confirmed=args.confirm,
+                    )
+                )
 
         if args.command == "sources":
             if args.sources_command == "list":
@@ -390,6 +496,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
 
+            if args.sources_command == "delete":
+                return asyncio.run(
+                    _delete_source(
+                        source_id=args.source_id,
+                        confirmed=args.confirm,
+                    )
+                )
+
         if args.command == "ingestions":
             if args.ingestions_command == "list":
                 return asyncio.run(
@@ -402,6 +516,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return asyncio.run(
                     _show_ingestion(
                         ingestion_id=args.ingestion_id,
+                    )
+                )
+
+            if args.ingestions_command == "delete":
+                return asyncio.run(
+                    _delete_ingestion(
+                        ingestion_id=args.ingestion_id,
+                        confirmed=args.confirm,
                     )
                 )
 
@@ -424,12 +546,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     except (
         DatabaseNotEnabledError,
+        DestructiveOperationNotConfirmedError,
         DocumentNotFoundError,
         IngestionNotFoundError,
         InvalidAdminLimitError,
         InvalidDocumentIdError,
         InvalidIngestionIdError,
         InvalidSourceIdError,
+        SourceDeletionRestrictedError,
         SourceNotFoundError,
     ) as exc:
         print(f"ai-irp-admin: {exc}", file=sys.stderr)

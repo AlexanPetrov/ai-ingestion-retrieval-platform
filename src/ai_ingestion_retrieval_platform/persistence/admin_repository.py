@@ -1,11 +1,11 @@
-"""Read-oriented persistence operations for administrative tooling."""
+"""Read and administrative persistence operations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_ingestion_retrieval_platform.persistence.models import (
@@ -17,7 +17,7 @@ from ai_ingestion_retrieval_platform.persistence.models import (
 
 @dataclass(frozen=True, slots=True)
 class DatabaseStats:
-    """Counts of persisted application entities."""
+    """Persisted entity counts."""
 
     sources: int
     ingestion_records: int
@@ -25,8 +25,17 @@ class DatabaseStats:
 
 
 @dataclass(frozen=True, slots=True)
+class DatabasePurgeResult:
+    """Counts of application rows removed by a database purge."""
+
+    sources_deleted: int
+    ingestion_records_deleted: int
+    parsed_documents_deleted: int
+
+
+@dataclass(frozen=True, slots=True)
 class SourceSummary:
-    """Administrative summary of a persisted source."""
+    """Administrative source representation."""
 
     id: str
     url: str
@@ -36,7 +45,7 @@ class SourceSummary:
 
 @dataclass(frozen=True, slots=True)
 class IngestionSummary:
-    """Administrative summary of a persisted ingestion record."""
+    """Administrative ingestion-list representation."""
 
     id: str
     source_id: str
@@ -48,44 +57,37 @@ class IngestionSummary:
 
 @dataclass(frozen=True, slots=True)
 class IngestionDetail:
-    """Administrative detail for one persisted ingestion record."""
+    """Detailed administrative ingestion representation."""
 
     id: str
     source_id: str
     parsed_document_id: str | None
-
     ingestion_mode: str
-
     batch_id: str | None
     batch_position: int | None
-
     request_id: str | None
     client_ip: str | None
-
     http_status: int | None
     http_status_reason: str | None
     final_url: str | None
     response_content_type: str | None
     response_content_length: int | None
-
     fetch_elapsed_ms: int | None
     fetch_error_code: str | None
     fetch_error_message: str | None
     retry_attempts: int
     fetched_at: datetime
-
     parser_name: str | None
     parser_version: str | None
     parse_elapsed_ms: int | None
     parse_error_code: str | None
     parse_error_message: str | None
-
     ingested_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedDocumentSummary:
-    """Administrative summary of a persisted parsed document."""
+    """Administrative parsed-document-list representation."""
 
     id: str
     ingestion_record_id: str
@@ -96,7 +98,7 @@ class ParsedDocumentSummary:
 
 @dataclass(frozen=True, slots=True)
 class ParsedDocumentDetail:
-    """Administrative detail for one persisted parsed document."""
+    """Detailed administrative parsed-document representation."""
 
     id: str
     ingestion_record_id: str
@@ -107,38 +109,65 @@ class ParsedDocumentDetail:
 
 
 class AdminRepository:
-    """Database queries used by administrative tooling."""
+    """Administrative persistence queries and mutations."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def get_database_stats(self) -> DatabaseStats:
-        """Return counts for the primary persistence entities."""
-        source_count = await self._session.scalar(
+        """Return counts for persisted application entities."""
+        source_result = await self._session.execute(
             select(func.count()).select_from(Source)
         )
-        ingestion_record_count = await self._session.scalar(
+        ingestion_result = await self._session.execute(
             select(func.count()).select_from(IngestionRecord)
         )
-        parsed_document_count = await self._session.scalar(
+        document_result = await self._session.execute(
             select(func.count()).select_from(ParsedDocument)
         )
 
         return DatabaseStats(
-            sources=source_count or 0,
-            ingestion_records=ingestion_record_count or 0,
-            parsed_documents=parsed_document_count or 0,
+            sources=source_result.scalar_one(),
+            ingestion_records=ingestion_result.scalar_one(),
+            parsed_documents=document_result.scalar_one(),
         )
 
-    async def list_sources(self, *, limit: int) -> list[SourceSummary]:
-        """Return persisted sources ordered from newest to oldest."""
-        result = await self._session.execute(
-            select(Source)
-            .order_by(
-                Source.created_at.desc(),
-                Source.id.desc(),
+    async def purge_database(self) -> DatabasePurgeResult:
+        """Delete all persisted application data.
+
+        The caller owns commit and rollback.
+
+        PostgreSQL table locks prevent concurrent persistence writes from
+        changing the dataset between the pre-delete counts and the deletes.
+        Parsed documents are removed through the existing database-level
+        cascade from ingestion records.
+        """
+        await self._session.execute(
+            text(
+                "LOCK TABLE source, ingestion_record, parsed_document "
+                "IN ACCESS EXCLUSIVE MODE"
             )
-            .limit(limit)
+        )
+
+        stats = await self.get_database_stats()
+
+        await self._session.execute(delete(IngestionRecord))
+        await self._session.execute(delete(Source))
+
+        return DatabasePurgeResult(
+            sources_deleted=stats.sources,
+            ingestion_records_deleted=stats.ingestion_records,
+            parsed_documents_deleted=stats.parsed_documents,
+        )
+
+    async def list_sources(
+        self,
+        *,
+        limit: int,
+    ) -> list[SourceSummary]:
+        """Return persisted sources ordered newest first."""
+        result = await self._session.execute(
+            select(Source).order_by(Source.created_at.desc()).limit(limit)
         )
 
         sources = result.scalars().all()
@@ -153,8 +182,11 @@ class AdminRepository:
             for source in sources
         ]
 
-    async def get_source(self, source_id: str) -> SourceSummary | None:
-        """Return one persisted source by ID."""
+    async def get_source(
+        self,
+        source_id: str,
+    ) -> SourceSummary | None:
+        """Return one persisted source."""
         result = await self._session.execute(
             select(Source).where(Source.id == source_id)
         )
@@ -171,38 +203,59 @@ class AdminRepository:
             last_seen_at=source.last_seen_at,
         )
 
-    async def list_ingestions(self, *, limit: int) -> list[IngestionSummary]:
-        """Return ingestion records ordered from newest to oldest."""
+    async def delete_source(
+        self,
+        source_id: str,
+    ) -> bool:
+        """Delete one source and report whether it existed.
+
+        The repository does not commit the transaction.
+
+        PostgreSQL remains responsible for enforcing the restrictive
+        relationship from ingestion records to sources. A source that
+        still has ingestion history therefore cannot be deleted.
+        """
+        result = await self._session.execute(
+            delete(Source).where(Source.id == source_id).returning(Source.id)
+        )
+
+        deleted_id = result.scalar_one_or_none()
+
+        return deleted_id is not None
+
+    async def list_ingestions(
+        self,
+        *,
+        limit: int,
+    ) -> list[IngestionSummary]:
+        """Return persisted ingestion records ordered newest first."""
         result = await self._session.execute(
             select(IngestionRecord)
-            .order_by(
-                IngestionRecord.ingested_at.desc(),
-                IngestionRecord.id.desc(),
-            )
+            .order_by(IngestionRecord.ingested_at.desc())
             .limit(limit)
         )
 
-        ingestion_records = result.scalars().all()
+        ingestions = result.scalars().all()
 
         return [
             IngestionSummary(
-                id=str(record.id),
-                source_id=str(record.source_id),
-                ingestion_mode=record.ingestion_mode,
+                id=str(ingestion.id),
+                source_id=str(ingestion.source_id),
+                ingestion_mode=ingestion.ingestion_mode,
                 batch_id=(
-                    str(record.batch_id) if record.batch_id is not None else None
+                    str(ingestion.batch_id) if ingestion.batch_id is not None else None
                 ),
-                batch_position=record.batch_position,
-                ingested_at=record.ingested_at,
+                batch_position=ingestion.batch_position,
+                ingested_at=ingestion.ingested_at,
             )
-            for record in ingestion_records
+            for ingestion in ingestions
         ]
 
     async def get_ingestion(
         self,
         ingestion_id: str,
     ) -> IngestionDetail | None:
-        """Return one persisted ingestion record by ID."""
+        """Return one persisted ingestion record."""
         result = await self._session.execute(
             select(
                 IngestionRecord,
@@ -220,49 +273,68 @@ class AdminRepository:
         if row is None:
             return None
 
-        record, parsed_document_id = row
+        ingestion = row[0]
+        parsed_document_id = row[1]
 
         return IngestionDetail(
-            id=str(record.id),
-            source_id=str(record.source_id),
+            id=str(ingestion.id),
+            source_id=str(ingestion.source_id),
             parsed_document_id=(
                 str(parsed_document_id) if parsed_document_id is not None else None
             ),
-            ingestion_mode=record.ingestion_mode,
-            batch_id=(str(record.batch_id) if record.batch_id is not None else None),
-            batch_position=record.batch_position,
-            request_id=record.request_id,
-            client_ip=record.client_ip,
-            http_status=record.http_status,
-            http_status_reason=record.http_status_reason,
-            final_url=record.final_url,
-            response_content_type=record.response_content_type,
-            response_content_length=record.response_content_length,
-            fetch_elapsed_ms=record.fetch_elapsed_ms,
-            fetch_error_code=record.fetch_error_code,
-            fetch_error_message=record.fetch_error_message,
-            retry_attempts=record.retry_attempts,
-            fetched_at=record.fetched_at,
-            parser_name=record.parser_name,
-            parser_version=record.parser_version,
-            parse_elapsed_ms=record.parse_elapsed_ms,
-            parse_error_code=record.parse_error_code,
-            parse_error_message=record.parse_error_message,
-            ingested_at=record.ingested_at,
+            ingestion_mode=ingestion.ingestion_mode,
+            batch_id=(
+                str(ingestion.batch_id) if ingestion.batch_id is not None else None
+            ),
+            batch_position=ingestion.batch_position,
+            request_id=ingestion.request_id,
+            client_ip=ingestion.client_ip,
+            http_status=ingestion.http_status,
+            http_status_reason=ingestion.http_status_reason,
+            final_url=ingestion.final_url,
+            response_content_type=ingestion.response_content_type,
+            response_content_length=ingestion.response_content_length,
+            fetch_elapsed_ms=ingestion.fetch_elapsed_ms,
+            fetch_error_code=ingestion.fetch_error_code,
+            fetch_error_message=ingestion.fetch_error_message,
+            retry_attempts=ingestion.retry_attempts,
+            fetched_at=ingestion.fetched_at,
+            parser_name=ingestion.parser_name,
+            parser_version=ingestion.parser_version,
+            parse_elapsed_ms=ingestion.parse_elapsed_ms,
+            parse_error_code=ingestion.parse_error_code,
+            parse_error_message=ingestion.parse_error_message,
+            ingested_at=ingestion.ingested_at,
         )
+
+    async def delete_ingestion(
+        self,
+        ingestion_id: str,
+    ) -> bool:
+        """Delete one ingestion record and report whether it existed.
+
+        The repository does not commit the transaction. Any linked parsed
+        document is removed by the database-level ON DELETE CASCADE.
+        """
+        result = await self._session.execute(
+            delete(IngestionRecord)
+            .where(IngestionRecord.id == ingestion_id)
+            .returning(IngestionRecord.id)
+        )
+
+        deleted_id = result.scalar_one_or_none()
+
+        return deleted_id is not None
 
     async def list_documents(
         self,
         *,
         limit: int,
     ) -> list[ParsedDocumentSummary]:
-        """Return parsed documents ordered from newest to oldest."""
+        """Return persisted parsed documents ordered newest first."""
         result = await self._session.execute(
             select(ParsedDocument)
-            .order_by(
-                ParsedDocument.created_at.desc(),
-                ParsedDocument.id.desc(),
-            )
+            .order_by(ParsedDocument.created_at.desc())
             .limit(limit)
         )
 
@@ -283,7 +355,7 @@ class AdminRepository:
         self,
         document_id: str,
     ) -> ParsedDocumentDetail | None:
-        """Return one persisted parsed document by ID."""
+        """Return one persisted parsed document."""
         result = await self._session.execute(
             select(ParsedDocument).where(ParsedDocument.id == document_id)
         )

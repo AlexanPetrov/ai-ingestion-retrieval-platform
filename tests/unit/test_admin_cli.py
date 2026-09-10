@@ -9,6 +9,7 @@ import pytest
 
 from ai_ingestion_retrieval_platform import admin_cli
 from ai_ingestion_retrieval_platform.persistence.admin_repository import (
+    DatabasePurgeResult,
     DatabaseStats,
     IngestionDetail,
     IngestionSummary,
@@ -18,12 +19,14 @@ from ai_ingestion_retrieval_platform.persistence.admin_repository import (
 )
 from ai_ingestion_retrieval_platform.services.admin import (
     DatabaseNotEnabledError,
+    DestructiveOperationNotConfirmedError,
     DocumentNotFoundError,
     IngestionNotFoundError,
     InvalidAdminLimitError,
     InvalidDocumentIdError,
     InvalidIngestionIdError,
     InvalidSourceIdError,
+    SourceDeletionRestrictedError,
     SourceNotFoundError,
 )
 
@@ -73,6 +76,118 @@ def test_main_database_stats_reports_disabled_database(
     )
 
     result = admin_cli.main(["database", "stats"])
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Database persistence is disabled. Set DATABASE_ENABLED=true.\n"
+    )
+
+
+def test_main_database_purge_prints_deleted_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    purge_database = AsyncMock(
+        return_value=DatabasePurgeResult(
+            sources_deleted=2,
+            ingestion_records_deleted=6,
+            parsed_documents_deleted=3,
+        )
+    )
+
+    monkeypatch.setattr(
+        admin_cli,
+        "purge_database",
+        purge_database,
+    )
+
+    result = admin_cli.main(
+        [
+            "database",
+            "purge",
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert captured.out == (
+        "Database purge complete\n"
+        "Sources deleted:           2\n"
+        "Ingestion records deleted: 6\n"
+        "Parsed documents deleted:  3\n"
+    )
+    assert captured.err == ""
+
+    purge_database.assert_awaited_once_with(
+        ANY,
+        confirmed=True,
+    )
+
+
+def test_main_database_purge_reports_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    purge_database = AsyncMock(
+        side_effect=DestructiveOperationNotConfirmedError(
+            "Database purge requires explicit confirmation. Re-run with --confirm."
+        )
+    )
+
+    monkeypatch.setattr(
+        admin_cli,
+        "purge_database",
+        purge_database,
+    )
+
+    result = admin_cli.main(
+        [
+            "database",
+            "purge",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Database purge requires explicit confirmation. "
+        "Re-run with --confirm.\n"
+    )
+
+    purge_database.assert_awaited_once_with(
+        ANY,
+        confirmed=False,
+    )
+
+
+def test_main_database_purge_reports_disabled_database(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        admin_cli,
+        "purge_database",
+        AsyncMock(
+            side_effect=DatabaseNotEnabledError(
+                "Database persistence is disabled. Set DATABASE_ENABLED=true."
+            )
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "database",
+            "purge",
+            "--confirm",
+        ]
+    )
 
     captured = capsys.readouterr()
 
@@ -273,6 +388,180 @@ def test_main_sources_show_reports_source_not_found(
     assert result == 2
     assert captured.out == ""
     assert captured.err == (f"ai-irp-admin: Source {source_id} was not found.\n")
+
+
+def test_main_sources_delete_prints_deleted_source(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_id = "123e4567-e89b-12d3-a456-426614174000"
+
+    delete_source = AsyncMock(return_value=source_id)
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_source",
+        delete_source,
+    )
+
+    result = admin_cli.main(
+        [
+            "sources",
+            "delete",
+            source_id,
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert captured.out == f"Deleted source {source_id}.\n"
+    assert captured.err == ""
+
+    delete_source.assert_awaited_once_with(
+        ANY,
+        source_id=source_id,
+        confirmed=True,
+    )
+
+
+def test_main_sources_delete_reports_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_id = "123e4567-e89b-12d3-a456-426614174000"
+
+    delete_source = AsyncMock(
+        side_effect=DestructiveOperationNotConfirmedError(
+            "Source deletion requires explicit confirmation. Re-run with --confirm."
+        )
+    )
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_source",
+        delete_source,
+    )
+
+    result = admin_cli.main(
+        [
+            "sources",
+            "delete",
+            source_id,
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Source deletion requires explicit confirmation. "
+        "Re-run with --confirm.\n"
+    )
+
+    delete_source.assert_awaited_once_with(
+        ANY,
+        source_id=source_id,
+        confirmed=False,
+    )
+
+
+def test_main_sources_delete_reports_invalid_source_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_source",
+        AsyncMock(
+            side_effect=InvalidSourceIdError(
+                "Invalid source ID 'not-a-uuid'; expected a UUID."
+            )
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "sources",
+            "delete",
+            "not-a-uuid",
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Invalid source ID 'not-a-uuid'; expected a UUID.\n"
+    )
+
+
+def test_main_sources_delete_reports_source_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_id = "123e4567-e89b-12d3-a456-426614174000"
+
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_source",
+        AsyncMock(
+            side_effect=SourceNotFoundError(f"Source {source_id} was not found.")
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "sources",
+            "delete",
+            source_id,
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (f"ai-irp-admin: Source {source_id} was not found.\n")
+
+
+def test_main_sources_delete_reports_restricted_source(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_id = "123e4567-e89b-12d3-a456-426614174000"
+
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_source",
+        AsyncMock(
+            side_effect=SourceDeletionRestrictedError(
+                f"Source {source_id} cannot be deleted because "
+                "ingestion history still references it."
+            )
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "sources",
+            "delete",
+            source_id,
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        f"ai-irp-admin: Source {source_id} cannot be deleted because "
+        "ingestion history still references it.\n"
+    )
 
 
 def test_main_ingestions_list_prints_ingestions(
@@ -555,6 +844,146 @@ def test_main_ingestions_show_reports_ingestion_not_found(
     assert captured.err == (f"ai-irp-admin: Ingestion {ingestion_id} was not found.\n")
 
 
+def test_main_ingestions_delete_prints_deleted_ingestion(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ingestion_id = "123e4567-e89b-12d3-a456-426614174001"
+
+    delete_ingestion = AsyncMock(return_value=ingestion_id)
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_ingestion",
+        delete_ingestion,
+    )
+
+    result = admin_cli.main(
+        [
+            "ingestions",
+            "delete",
+            ingestion_id,
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert captured.out == f"Deleted ingestion {ingestion_id}.\n"
+    assert captured.err == ""
+
+    delete_ingestion.assert_awaited_once_with(
+        ANY,
+        ingestion_id=ingestion_id,
+        confirmed=True,
+    )
+
+
+def test_main_ingestions_delete_reports_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ingestion_id = "123e4567-e89b-12d3-a456-426614174001"
+
+    delete_ingestion = AsyncMock(
+        side_effect=DestructiveOperationNotConfirmedError(
+            "Ingestion deletion requires explicit confirmation. Re-run with --confirm."
+        )
+    )
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_ingestion",
+        delete_ingestion,
+    )
+
+    result = admin_cli.main(
+        [
+            "ingestions",
+            "delete",
+            ingestion_id,
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Ingestion deletion requires explicit confirmation. "
+        "Re-run with --confirm.\n"
+    )
+
+    delete_ingestion.assert_awaited_once_with(
+        ANY,
+        ingestion_id=ingestion_id,
+        confirmed=False,
+    )
+
+
+def test_main_ingestions_delete_reports_invalid_ingestion_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_ingestion",
+        AsyncMock(
+            side_effect=InvalidIngestionIdError(
+                "Invalid ingestion ID 'not-a-uuid'; expected a UUID."
+            )
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "ingestions",
+            "delete",
+            "not-a-uuid",
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "ai-irp-admin: Invalid ingestion ID 'not-a-uuid'; expected a UUID.\n"
+    )
+
+
+def test_main_ingestions_delete_reports_ingestion_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ingestion_id = "123e4567-e89b-12d3-a456-426614174001"
+
+    monkeypatch.setattr(
+        admin_cli,
+        "delete_ingestion",
+        AsyncMock(
+            side_effect=IngestionNotFoundError(
+                f"Ingestion {ingestion_id} was not found."
+            )
+        ),
+    )
+
+    result = admin_cli.main(
+        [
+            "ingestions",
+            "delete",
+            ingestion_id,
+            "--confirm",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (f"ai-irp-admin: Ingestion {ingestion_id} was not found.\n")
+
+
 def test_main_documents_list_prints_documents(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -751,6 +1180,13 @@ def test_main_documents_show_reports_document_not_found(
     assert captured.err == (f"ai-irp-admin: Document {document_id} was not found.\n")
 
 
+def test_database_requires_subcommand() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        admin_cli.main(["database"])
+
+    assert exc_info.value.code == 2
+
+
 def test_sources_requires_subcommand() -> None:
     with pytest.raises(SystemExit) as exc_info:
         admin_cli.main(["sources"])
@@ -765,6 +1201,13 @@ def test_sources_show_requires_source_id() -> None:
     assert exc_info.value.code == 2
 
 
+def test_sources_delete_requires_source_id() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        admin_cli.main(["sources", "delete"])
+
+    assert exc_info.value.code == 2
+
+
 def test_ingestions_requires_subcommand() -> None:
     with pytest.raises(SystemExit) as exc_info:
         admin_cli.main(["ingestions"])
@@ -775,6 +1218,13 @@ def test_ingestions_requires_subcommand() -> None:
 def test_ingestions_show_requires_ingestion_id() -> None:
     with pytest.raises(SystemExit) as exc_info:
         admin_cli.main(["ingestions", "show"])
+
+    assert exc_info.value.code == 2
+
+
+def test_ingestions_delete_requires_ingestion_id() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        admin_cli.main(["ingestions", "delete"])
 
     assert exc_info.value.code == 2
 

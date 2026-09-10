@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import UUID
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.persistence.admin_repository import (
+    DatabasePurgeResult,
     DatabaseStats,
     IngestionDetail,
     IngestionSummary,
@@ -20,14 +22,24 @@ from ai_ingestion_retrieval_platform.persistence.admin_repository import (
 from ai_ingestion_retrieval_platform.services import admin as admin_service
 from ai_ingestion_retrieval_platform.services.admin import (
     DatabaseNotEnabledError,
+    DestructiveOperationNotConfirmedError,
     DocumentNotFoundError,
     IngestionNotFoundError,
     InvalidAdminLimitError,
     InvalidDocumentIdError,
     InvalidIngestionIdError,
     InvalidSourceIdError,
+    SourceDeletionRestrictedError,
     SourceNotFoundError,
 )
+
+
+class FakePostgresIntegrityError(Exception):
+    """Minimal PostgreSQL-like exception carrying a SQLSTATE."""
+
+    def __init__(self, message: str, *, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
 
 
 @pytest.mark.parametrize("limit", [1, 50, 500])
@@ -203,6 +215,218 @@ async def test_get_database_stats_closes_engine_when_repository_fails(
     with pytest.raises(RuntimeError, match="database query failed"):
         await admin_service.get_database_stats(settings)
 
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_purge_database_rejects_disabled_database() -> None:
+    settings = Settings.model_construct(database_enabled=False)
+
+    with pytest.raises(
+        DatabaseNotEnabledError,
+        match="Database persistence is disabled",
+    ):
+        await admin_service.purge_database(
+            settings,
+            confirmed=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_purge_database_rejects_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    create_database_engine = Mock()
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        create_database_engine,
+    )
+
+    with pytest.raises(
+        DestructiveOperationNotConfirmedError,
+        match=("Database purge requires explicit confirmation. Re-run with --confirm."),
+    ):
+        await admin_service.purge_database(
+            settings,
+            confirmed=False,
+        )
+
+    create_database_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_purge_database_commits_successful_purge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    expected_result = DatabasePurgeResult(
+        sources_deleted=2,
+        ingestion_records_deleted=6,
+        parsed_documents_deleted=3,
+    )
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.purge_database = AsyncMock(return_value=expected_result)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    result = await admin_service.purge_database(
+        settings,
+        confirmed=True,
+    )
+
+    assert result == expected_result
+    repository.purge_database.assert_awaited_once_with()
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_not_awaited()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_purge_database_rolls_back_when_repository_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.purge_database = AsyncMock(
+        side_effect=RuntimeError("database purge failed")
+    )
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database purge failed"):
+        await admin_service.purge_database(
+            settings,
+            confirmed=True,
+        )
+
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_purge_database_rolls_back_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    expected_result = DatabasePurgeResult(
+        sources_deleted=2,
+        ingestion_records_deleted=6,
+        parsed_documents_deleted=3,
+    )
+
+    engine = object()
+    session = AsyncMock()
+    session.commit.side_effect = RuntimeError("database commit failed")
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.purge_database = AsyncMock(return_value=expected_result)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        await admin_service.purge_database(
+            settings,
+            confirmed=True,
+        )
+
+    repository.purge_database.assert_awaited_once_with()
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_awaited_once_with()
     close_database.assert_awaited_once_with(engine)
 
 
@@ -574,6 +798,444 @@ async def test_get_source_normalizes_uuid_before_repository_lookup(
 
 
 @pytest.mark.asyncio
+async def test_delete_source_rejects_disabled_database() -> None:
+    settings = Settings.model_construct(database_enabled=False)
+
+    with pytest.raises(
+        DatabaseNotEnabledError,
+        match="Database persistence is disabled",
+    ):
+        await admin_service.delete_source(
+            settings,
+            source_id="550e8400-e29b-41d4-a716-446655440000",
+            confirmed=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_source_rejects_invalid_source_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    create_database_engine = Mock()
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        create_database_engine,
+    )
+
+    with pytest.raises(
+        InvalidSourceIdError,
+        match="Invalid source ID 'not-a-uuid'; expected a UUID",
+    ):
+        await admin_service.delete_source(
+            settings,
+            source_id="not-a-uuid",
+            confirmed=True,
+        )
+
+    create_database_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_source_rejects_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    create_database_engine = Mock()
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        create_database_engine,
+    )
+
+    with pytest.raises(
+        DestructiveOperationNotConfirmedError,
+        match=(
+            "Source deletion requires explicit confirmation. Re-run with --confirm."
+        ),
+    ):
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=False,
+        )
+
+    create_database_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_source_commits_successful_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550E8400-E29B-41D4-A716-446655440000"
+    normalized_source_id = str(UUID(source_id))
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    result = await admin_service.delete_source(
+        settings,
+        source_id=source_id,
+        confirmed=True,
+    )
+
+    assert result == normalized_source_id
+    repository.delete_source.assert_awaited_once_with(normalized_source_id)
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_not_awaited()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_source_rolls_back_when_source_does_not_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(
+        SourceNotFoundError,
+        match=f"Source {source_id} was not found",
+    ):
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=True,
+        )
+
+    repository.delete_source.assert_awaited_once_with(source_id)
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_source_translates_foreign_key_integrity_error_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(
+        side_effect=IntegrityError(
+            "DELETE FROM source",
+            {"id": source_id},
+            FakePostgresIntegrityError(
+                "foreign key violation",
+                sqlstate="23503",
+            ),
+        )
+    )
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(
+        SourceDeletionRestrictedError,
+        match=(
+            f"Source {source_id} cannot be deleted because "
+            "ingestion history still references it"
+        ),
+    ):
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=True,
+        )
+
+    repository.delete_source.assert_awaited_once_with(source_id)
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_source_reraises_non_foreign_key_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    integrity_error = IntegrityError(
+        "DELETE FROM source",
+        {"id": source_id},
+        FakePostgresIntegrityError(
+            "unique violation",
+            sqlstate="23505",
+        ),
+    )
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(side_effect=integrity_error)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(IntegrityError) as exc_info:
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=True,
+        )
+
+    assert exc_info.value is integrity_error
+    repository.delete_source.assert_awaited_once_with(source_id)
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_source_rolls_back_when_repository_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(
+        side_effect=RuntimeError("database delete failed")
+    )
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database delete failed"):
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=True,
+        )
+
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_source_rolls_back_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    engine = object()
+    session = AsyncMock()
+    session.commit.side_effect = RuntimeError("database commit failed")
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_source = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        await admin_service.delete_source(
+            settings,
+            source_id=source_id,
+            confirmed=True,
+        )
+
+    repository.delete_source.assert_awaited_once_with(source_id)
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
 async def test_list_ingestions_rejects_disabled_database() -> None:
     settings = Settings.model_construct(database_enabled=False)
 
@@ -928,6 +1590,307 @@ async def test_get_ingestion_closes_engine_when_repository_fails(
             ingestion_id=ingestion_id,
         )
 
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rejects_disabled_database() -> None:
+    settings = Settings.model_construct(database_enabled=False)
+
+    with pytest.raises(
+        DatabaseNotEnabledError,
+        match="Database persistence is disabled",
+    ):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id="550e8400-e29b-41d4-a716-446655440001",
+            confirmed=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rejects_invalid_ingestion_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    create_database_engine = Mock()
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        create_database_engine,
+    )
+
+    with pytest.raises(
+        InvalidIngestionIdError,
+        match="Invalid ingestion ID 'not-a-uuid'; expected a UUID",
+    ):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id="not-a-uuid",
+            confirmed=True,
+        )
+
+    create_database_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rejects_missing_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    ingestion_id = "550e8400-e29b-41d4-a716-446655440001"
+
+    create_database_engine = Mock()
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        create_database_engine,
+    )
+
+    with pytest.raises(
+        DestructiveOperationNotConfirmedError,
+        match=(
+            "Ingestion deletion requires explicit confirmation. Re-run with --confirm."
+        ),
+    ):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id=ingestion_id,
+            confirmed=False,
+        )
+
+    create_database_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_commits_successful_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    ingestion_id = "550E8400-E29B-41D4-A716-446655440001"
+    normalized_ingestion_id = str(UUID(ingestion_id))
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_ingestion = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    result = await admin_service.delete_ingestion(
+        settings,
+        ingestion_id=ingestion_id,
+        confirmed=True,
+    )
+
+    assert result == normalized_ingestion_id
+    repository.delete_ingestion.assert_awaited_once_with(normalized_ingestion_id)
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_not_awaited()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rolls_back_when_ingestion_does_not_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    ingestion_id = "550e8400-e29b-41d4-a716-446655440001"
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_ingestion = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(
+        IngestionNotFoundError,
+        match=f"Ingestion {ingestion_id} was not found",
+    ):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id=ingestion_id,
+            confirmed=True,
+        )
+
+    repository.delete_ingestion.assert_awaited_once_with(ingestion_id)
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rolls_back_when_repository_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    ingestion_id = "550e8400-e29b-41d4-a716-446655440001"
+
+    engine = object()
+    session = AsyncMock()
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_ingestion = AsyncMock(
+        side_effect=RuntimeError("database delete failed")
+    )
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database delete failed"):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id=ingestion_id,
+            confirmed=True,
+        )
+
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    close_database.assert_awaited_once_with(engine)
+
+
+@pytest.mark.asyncio
+async def test_delete_ingestion_rolls_back_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(database_enabled=True)
+
+    ingestion_id = "550e8400-e29b-41d4-a716-446655440001"
+
+    engine = object()
+    session = AsyncMock()
+    session.commit.side_effect = RuntimeError("database commit failed")
+
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = Mock(return_value=session_context)
+
+    repository = Mock()
+    repository.delete_ingestion = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        admin_service,
+        "create_database_engine",
+        Mock(return_value=engine),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "get_session_factory",
+        Mock(return_value=session_factory),
+    )
+    monkeypatch.setattr(
+        admin_service,
+        "AdminRepository",
+        Mock(return_value=repository),
+    )
+
+    close_database = AsyncMock()
+    monkeypatch.setattr(
+        admin_service,
+        "close_database",
+        close_database,
+    )
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        await admin_service.delete_ingestion(
+            settings,
+            ingestion_id=ingestion_id,
+            confirmed=True,
+        )
+
+    repository.delete_ingestion.assert_awaited_once_with(ingestion_id)
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_awaited_once_with()
     close_database.assert_awaited_once_with(engine)
 
 

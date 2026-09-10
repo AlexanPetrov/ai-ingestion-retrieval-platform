@@ -1,14 +1,14 @@
 # AI Ingestion & Retrieval Platform
 
-Production-grade asynchronous ingestion platform built with FastAPI, secure outbound I/O, bounded parser execution, PostgreSQL persistence, Alembic migrations, authentication, rate limiting, operational observability, and shell-based administrative inspection tooling.
+Production-grade asynchronous ingestion platform built with FastAPI, secure outbound I/O, bounded parser execution, PostgreSQL persistence, Alembic migrations, authentication, rate limiting, operational observability, and shell-based administrative tooling.
 
 **Current status: Stage 3.5 in progress — Production Hardening / Operationalization**
 
-Stages 1–3 are complete. The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, parsing, transaction handling, persistence, schema migration, readiness behavior, real PostgreSQL integration testing, and a read-only administrative CLI are implemented.
+Stages 1–3 are complete. The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, parsing, transaction handling, persistence, schema migration, readiness behavior, real PostgreSQL integration testing, and shell-only administrative read/write tooling are implemented.
 
-The administrative CLI currently supports inspection only. Destructive administrative operations such as ingestion deletion, source deletion, and database purge are **not implemented yet**.
+The administrative CLI supports database statistics, source/ingestion/document inspection, ingestion deletion, restricted source deletion, and full application-data purge with explicit destructive-operation confirmation.
 
-**Next Stage 3.5 work: deletion lifecycle and remaining persistence operational hardening.**
+**Next Stage 3.5 work: remaining persistence operational hardening, metadata semantics, persistence-specific metrics, and final architecture/operations documentation before Stage 4.**
 
 **Stage 4 — Indexing and Retrieval** remains planned but is **not implemented yet**.
 
@@ -79,7 +79,7 @@ The administrative CLI currently supports inspection only. Destructive administr
 - Transaction rollback semantics
 - Database-level constraints and referential integrity
 
-### Administrative inspection
+### Administrative operations
 
 - Internal shell-only `ai-irp-admin` CLI
 - Database entity counts
@@ -94,18 +94,15 @@ The administrative CLI currently supports inspection only. Destructive administr
 - UUID validation and normalization
 - Explicit not-found handling
 - Database-disabled handling
-- Repository/service/CLI separation for administrative reads
+- Ingestion deletion with explicit `--confirm`
+- Database-level parsed-document cascade when deleting an ingestion
+- Source deletion with explicit `--confirm`
+- Source-delete restriction while ingestion history exists
+- Full application-data purge with explicit `--confirm`
+- Transaction ownership and rollback for administrative writes
+- Repository/service/CLI separation for administrative operations
 
-The administrative tooling is currently **read-only**.
-
-The following administrative write operations are **not implemented yet**:
-
-- ingestion deletion
-- source deletion
-- database purge
-- other administrative mutation commands
-
-An independent parsed-document delete command is not planned for the initial deletion lifecycle. Parsed-document lifecycle belongs to the owning ingestion record.
+An independent parsed-document delete command is intentionally not exposed. Parsed-document lifecycle belongs to the owning ingestion record.
 
 ### Security and operations
 
@@ -135,7 +132,7 @@ An independent parsed-document delete command is not planned for the initial del
 
 ## Architecture
 
-The application separates inbound API concerns, secure outbound fetching, parser execution, persistence, administrative inspection, and infrastructure lifecycle.
+The application separates inbound API concerns, secure outbound fetching, parser execution, persistence, administrative operations, and infrastructure lifecycle.
 
 ```text
 Client
@@ -177,7 +174,7 @@ Ingestion orchestration
          +--> PostgreSQL
 ```
 
-Administrative inspection uses a separate shell-only path:
+Administrative operations use a separate shell-only path:
 
 ```text
 Operator
@@ -265,7 +262,7 @@ Swagger UI is available locally at:
 http://127.0.0.1:8000/docs
 ```
 
-There is currently **no HTTP administration API**. Administrative inspection is shell-only through `ai-irp-admin`.
+There is currently **no HTTP administration API**. Administrative operations are shell-only through `ai-irp-admin`.
 
 ---
 
@@ -290,32 +287,21 @@ The current command surface is:
 ai-irp-admin
 ├── sources
 │   ├── list [--limit N]
-│   └── show <uuid>
+│   ├── show <uuid>
+│   └── delete <uuid> --confirm
 ├── ingestions
 │   ├── list [--limit N]
-│   └── show <uuid>
+│   ├── show <uuid>
+│   └── delete <uuid> --confirm
 ├── documents
 │   ├── list [--limit N]
 │   └── show <uuid>
 └── database
-    └── stats
+    ├── stats
+    └── purge --confirm
 ```
 
-### Read-only status
-
-The administrative CLI currently performs **inspection only**.
-
-It does not currently provide:
-
-```text
-sources delete
-ingestions delete
-database purge
-```
-
-Those operations belong to the upcoming deletion lifecycle and must preserve the existing database referential-integrity rules.
-
-There is no independent parsed-document delete command in the current design.
+The CLI is intentionally shell-only and is not exposed through the HTTP API or Swagger.
 
 ### Database statistics
 
@@ -353,6 +339,24 @@ The command displays:
 - URL
 - creation timestamp
 - last-seen timestamp
+
+### Delete a source
+
+```bash
+uv run ai-irp-admin sources delete <source-uuid> --confirm
+```
+
+Source deletion is intentionally restrictive.
+
+A source that is still referenced by one or more ingestion records cannot be deleted. PostgreSQL referential integrity remains authoritative; the administrative service rolls the failed transaction back and reports a usage-style error instead of deleting ingestion history automatically.
+
+Example:
+
+```text
+ai-irp-admin: Source <uuid> cannot be deleted because ingestion history still references it.
+```
+
+Once all ingestion records referencing the source have been removed, the source may be deleted explicitly.
 
 ### List ingestion records
 
@@ -397,6 +401,23 @@ The detail view exposes the persisted audit fields available for the ingestion, 
 
 The CLI reports actual persisted values. It does not fabricate values for metadata that upstream contracts do not yet supply authoritatively.
 
+### Delete an ingestion record
+
+```bash
+uv run ai-irp-admin ingestions delete <ingestion-uuid> --confirm
+```
+
+Deleting an ingestion record:
+
+- requires explicit `--confirm`
+- deletes exactly the requested ingestion record
+- deletes its linked `ParsedDocument`, when present, through the existing database-level `ON DELETE CASCADE`
+- preserves the owning `Source`
+- commits on success
+- rolls back on failure
+
+The source remains available because source identity and ingestion history have separate lifecycles.
+
 ### List parsed documents
 
 ```bash
@@ -429,30 +450,91 @@ The detail view displays:
 - creation timestamp
 - full persisted bounded `text_content`
 
-The administrative repository returns stored text unchanged. Presentation-level truncation or paging is not currently implemented.
+The administrative repository returns stored text unchanged. Presentation-level truncation, paging, or control-character sanitization is not currently implemented.
+
+There is no independent parsed-document delete command. Parsed-document deletion is owned by ingestion deletion.
+
+### Purge application data
+
+```bash
+uv run ai-irp-admin database purge --confirm
+```
+
+The purge command deletes all persisted application rows while preserving the database, schema, and Alembic migration state.
+
+The purge implementation:
+
+- requires explicit `--confirm`
+- acquires PostgreSQL table locks for `source`, `ingestion_record`, and `parsed_document`
+- counts the rows to be removed while those locks are held
+- deletes ingestion records first
+- relies on the existing ingestion-to-document database cascade for parsed documents
+- deletes sources after ingestion history is removed
+- commits the operation as one transaction
+- rolls back on failure
+- reports the source, ingestion-record, and parsed-document counts removed
+
+The implementation deliberately avoids `TRUNCATE ... CASCADE`. Future persistence dependencies introduced by Stage 4 should be added to the purge lifecycle explicitly rather than being deleted implicitly.
+
+Example output shape:
+
+```text
+Database purge complete
+Sources deleted:           10
+Ingestion records deleted: 25
+Parsed documents deleted:  18
+```
+
+### Destructive-operation confirmation
+
+Destructive commands require explicit confirmation:
+
+```text
+sources delete <uuid> --confirm
+ingestions delete <uuid> --confirm
+database purge --confirm
+```
+
+Without `--confirm`, the service rejects the operation before creating the database engine.
+
+Example:
+
+```text
+ai-irp-admin: Database purge requires explicit confirmation. Re-run with --confirm.
+```
 
 ### Administrative error behavior
 
-Invalid UUID input returns a usage-style administrative error and exit code `2`.
+Expected administrative input and domain errors return exit code `2`.
 
-Example:
+Invalid UUID input:
 
 ```text
 ai-irp-admin: Invalid document ID 'not-a-uuid'; expected a UUID.
 ```
 
-A valid but missing UUID also returns exit code `2`.
-
-Example:
+Valid but missing UUID:
 
 ```text
 ai-irp-admin: Document 123e4567-e89b-12d3-a456-426614174002 was not found.
 ```
 
-Invalid list limits return:
+Invalid list limit:
 
 ```text
 ai-irp-admin: Limit must be between 1 and 500.
+```
+
+Restricted source deletion:
+
+```text
+ai-irp-admin: Source <uuid> cannot be deleted because ingestion history still references it.
+```
+
+Missing destructive confirmation:
+
+```text
+ai-irp-admin: Ingestion deletion requires explicit confirmation. Re-run with --confirm.
 ```
 
 Administrative database operations require:
@@ -460,6 +542,8 @@ Administrative database operations require:
 ```dotenv
 DATABASE_ENABLED=true
 ```
+
+Unexpected database/runtime failures are not currently normalized into a separate friendly CLI error class and may still surface as unexpected failures.
 
 ---
 
@@ -547,7 +631,7 @@ PostgreSQL constraints enforce important persistence semantics, including:
 - restricted source deletion while ingestion history exists
 - parsed-document cascade when its ingestion record is deleted
 
-These deletion semantics are already enforced by the schema even though administrative delete commands have not yet been exposed.
+Administrative delete commands preserve these schema-enforced semantics rather than bypassing them.
 
 ---
 
@@ -633,6 +717,12 @@ The fetch and parser work occur before the short persistence transaction.
 For batch persisted ingestion, each URL is processed with its own database session/transaction. This allows partial success: one URL failing does not roll back successful URLs from the same batch request.
 
 Administrative read operations use short-lived async SQLAlchemy resources and close their database engine after the operation.
+
+Administrative write operations also use explicit service-owned transaction boundaries. Successful delete/purge operations commit once; not-found, referential-integrity, repository, and commit failures roll back before the database engine is closed.
+
+Source deletion does not pre-delete ingestion history. PostgreSQL's restrictive foreign key is the authoritative concurrency-safe guard.
+
+Database purge locks the application persistence tables, captures counts, deletes ingestion records so parsed documents cascade, then deletes sources in the same transaction.
 
 ### Failure Semantics
 
@@ -813,7 +903,17 @@ uv run ai-irp-admin ingestions show <ingestion-uuid>
 uv run ai-irp-admin documents show <document-uuid>
 ```
 
-The administrative CLI is currently read-only.
+Destructive operations require explicit confirmation:
+
+```bash
+uv run ai-irp-admin ingestions delete <ingestion-uuid> --confirm
+uv run ai-irp-admin sources delete <source-uuid> --confirm
+uv run ai-irp-admin database purge --confirm
+```
+
+A source cannot be deleted while ingestion history still references it. Delete the relevant ingestion records first only when that history is intentionally being removed.
+
+`database purge --confirm` deletes all application persistence rows. Use it only against a database whose application data is intentionally disposable.
 
 ### 8. Check health
 
@@ -1168,7 +1268,7 @@ The normal suite covers:
 
 ### Administrative CLI verification
 
-Administrative read tooling is tested at each layer:
+Administrative tooling is tested at each layer:
 
 ```text
 CLI
@@ -1183,9 +1283,9 @@ administrative repository
 Current focused test counts:
 
 ```text
-Admin repository: 15 passed
-Admin service:    40 passed
-Admin CLI:        31 passed
+Admin repository: 21 passed
+Admin service:    61 passed
+Admin CLI:        46 passed
 ```
 
 The focused tests verify:
@@ -1203,6 +1303,13 @@ The focused tests verify:
 - ingestion audit detail output
 - parsed-document metadata output
 - full parsed-document text output
+- ingestion deletion
+- source deletion
+- restrictive source-delete behavior
+- destructive-operation confirmation
+- commit/rollback behavior
+- database purge counts
+- empty-database purge behavior
 
 ### Real PostgreSQL integration tests
 
@@ -1226,6 +1333,28 @@ The PostgreSQL integration layer verifies behavior that mocks cannot establish r
 - source delete restriction
 - parsed-document cascade behavior
 - transaction rollback
+
+Administrative destructive operations have also been manually smoke-tested against PostgreSQL:
+
+```text
+ingestions delete <uuid> --confirm
+    -> ingestion deleted
+    -> linked parsed document cascades
+    -> source preserved
+
+sources delete <uuid> --confirm
+    -> referenced source refused and rolled back
+    -> unreferenced source deleted
+
+database purge
+    -> refused without --confirm and database unchanged
+
+database purge --confirm
+    -> reported counts match pre-purge counts
+    -> source, ingestion_record, and parsed_document rows removed
+```
+
+Both raw-only and parsed-document purge paths were verified.
 
 ### Dedicated test database safety
 
@@ -1300,12 +1429,12 @@ uv run alembic check
 Current verified baseline:
 
 ```text
-345 passed
-96.30% total test coverage
+387 passed
+96.41% total test coverage
 Ruff clean
-Pyright: 0 errors, 0 warnings, 0 informations
+Pyright 1.1.413: 0 errors, 0 warnings, 0 informations
 Administrative repository coverage: 100%
-Administrative service coverage: 100%
+Administrative service coverage: 99%
 Alembic check: No new upgrade operations detected.
 ```
 
@@ -1438,14 +1567,14 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 - `api/` — HTTP transport, dependencies, and route contracts
 - `core/` — configuration, limits, URL safety, and observability primitives
 - `middleware/` — request lifecycle logging and request ID propagation
-- `persistence/` — SQLAlchemy engine, models, ingestion repository, and administrative read repository
+- `persistence/` — SQLAlchemy engine, models, ingestion repository, and administrative read/write repository
 - `schemas/` — request/response and persistence schema validation
 - `services/fetching.py` — secure outbound fetch boundary
 - `services/parsing.py` — bounded parser boundary
 - `services/ingestion.py` — preview ingestion orchestration
 - `services/persistence.py` — durable ingestion orchestration and transaction ownership
-- `services/admin.py` — administrative validation and read orchestration
-- `admin_cli.py` — shell-only administrative command surface
+- `services/admin.py` — administrative validation, read orchestration, and write transaction ownership
+- `admin_cli.py` — shell-only administrative read/write command surface
 - `alembic/` — schema migration environment and revisions
 - `tests/integration/persistence/` — real PostgreSQL behavioral verification
 
@@ -1578,31 +1707,35 @@ Implemented:
 Implemented:
 
 - internal `ai-irp-admin` command
-- read-only database statistics
-- read-only source list/detail inspection
-- read-only ingestion list/detail inspection
-- read-only parsed-document list/detail inspection
+- database statistics
+- source list/detail inspection
+- ingestion list/detail inspection
+- parsed-document list/detail inspection
+- full persisted parsed-text inspection
 - administrative UUID validation
 - administrative not-found behavior
 - administrative database-disabled behavior
+- ingestion deletion with explicit confirmation
+- parsed-document cascade verification through ingestion deletion
+- source deletion with explicit confirmation
+- restrictive source deletion while ingestion history exists
+- full application-data purge with explicit confirmation
+- purge table locking and deterministic deletion counts
+- administrative write commit/rollback ownership
 - focused repository/service/CLI coverage
-- production verification baseline after administrative read tooling
+- real PostgreSQL smoke verification for destructive operations
+- Pyright 1.1.413 verification
+- production verification baseline of 387 passing tests and 96.41% coverage
 
 Planned remaining work:
 
-- deletion lifecycle
-  - ingestion deletion
-  - parsed-document cascade verification through admin operations
-  - source deletion rules
-  - explicit destructive-operation confirmations
-- database purge command with explicit confirmation
 - parsed-content hash/version semantics
 - authoritative parser identity/version propagation
 - persistence-specific metrics
 - additional architecture and operations documentation
 - final hardening verification before Stage 4
 
-Administrative destructive operations must not bypass the existing persistence invariants.
+Administrative destructive operations preserve the existing persistence invariants and remain shell-only.
 
 ### Stage 4 — Indexing and Retrieval
 
