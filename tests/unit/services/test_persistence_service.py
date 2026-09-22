@@ -66,7 +66,6 @@ def _response(
         "GET",
         url,
     )
-
     return httpx.Response(
         status_code=200,
         headers={
@@ -79,31 +78,168 @@ def _response(
 
 def _repository_mock() -> MagicMock:
     repository = MagicMock()
-
     repository.get_or_create_source = AsyncMock(
         return_value=SourceResult(
             source_id=uuid4(),
         )
     )
-
     repository.create_ingestion_record = AsyncMock(
         return_value=IngestionRecordResult(
             ingestion_record_id=uuid4(),
         )
     )
-
     repository.create_parsed_document = AsyncMock(
         return_value=ParsedDocumentResult(
             parsed_document_id=uuid4(),
         )
     )
-
     return repository
+
+
+class _MetricChild:
+    def __init__(
+        self,
+        recorder: _MetricRecorder,
+        labels: dict[str, str],
+    ) -> None:
+        self._recorder = recorder
+        self._labels = labels
+
+    def inc(self) -> None:
+        self._recorder.increments.append(self._labels.copy())
+
+    def observe(self, value: float) -> None:
+        self._recorder.observations.append((self._labels.copy(), value))
+
+
+class _MetricRecorder:
+    def __init__(self) -> None:
+        self.increments: list[dict[str, str]] = []
+        self.observations: list[tuple[dict[str, str], float]] = []
+
+    def labels(self, **labels: str) -> _MetricChild:
+        return _MetricChild(self, labels)
+
+
+def _install_persistence_metric_recorders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_MetricRecorder, _MetricRecorder, _MetricRecorder]:
+    operations = _MetricRecorder()
+    errors = _MetricRecorder()
+    durations = _MetricRecorder()
+
+    monkeypatch.setattr(
+        persistence_service,
+        "PERSISTENCE_OPERATIONS_TOTAL",
+        operations,
+    )
+    monkeypatch.setattr(
+        persistence_service,
+        "PERSISTENCE_ERRORS_TOTAL",
+        errors,
+    )
+    monkeypatch.setattr(
+        persistence_service,
+        "PERSISTENCE_TRANSACTION_DURATION_SECONDS",
+        durations,
+    )
+
+    return operations, errors, durations
+
+
+@pytest.mark.asyncio
+async def test_persistence_transaction_records_success_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations, errors, durations = _install_persistence_metric_recorders(monkeypatch)
+
+    async with persistence_service._persistence_transaction(
+        session=_session(),
+        operation="raw_ingestion",
+    ):
+        pass
+
+    assert operations.increments == [
+        {
+            "operation": "raw_ingestion",
+            "result": "success",
+        }
+    ]
+    assert errors.increments == []
+    assert len(durations.observations) == 1
+    labels, duration = durations.observations[0]
+    assert labels == {
+        "operation": "raw_ingestion",
+    }
+    assert duration >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_persistence_transaction_records_sqlalchemy_failure_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations, errors, durations = _install_persistence_metric_recorders(monkeypatch)
+
+    with pytest.raises(SQLAlchemyError):
+        async with persistence_service._persistence_transaction(
+            session=_session(),
+            operation="parsed_ingestion",
+        ):
+            raise SQLAlchemyError("database failed")
+
+    assert operations.increments == [
+        {
+            "operation": "parsed_ingestion",
+            "result": "failure",
+        }
+    ]
+    assert errors.increments == [
+        {
+            "operation": "parsed_ingestion",
+            "error_type": "sqlalchemy",
+        }
+    ]
+    assert len(durations.observations) == 1
+    assert durations.observations[0][0] == {
+        "operation": "parsed_ingestion",
+    }
+    assert durations.observations[0][1] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_persistence_transaction_records_unexpected_failure_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations, errors, durations = _install_persistence_metric_recorders(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        async with persistence_service._persistence_transaction(
+            session=_session(),
+            operation="parse_failure_audit",
+        ):
+            raise RuntimeError("unexpected persistence failure")
+
+    assert operations.increments == [
+        {
+            "operation": "parse_failure_audit",
+            "result": "failure",
+        }
+    ]
+    assert errors.increments == [
+        {
+            "operation": "parse_failure_audit",
+            "error_type": "unexpected",
+        }
+    ]
+    assert len(durations.observations) == 1
+    assert durations.observations[0][0] == {
+        "operation": "parse_failure_audit",
+    }
+    assert durations.observations[0][1] >= 0.0
 
 
 def test_elapsed_ms_never_returns_negative_value() -> None:
     result = persistence_service._elapsed_ms(perf_counter() + 100.0)
-
     assert result == 0
 
 
@@ -114,9 +250,7 @@ def test_get_parser_failure_provenance_returns_known_parser() -> None:
         parser_name=parsing_service.TEXT_PARSER_NAME,
         parser_version=parsing_service.TEXT_PARSER_VERSION,
     )
-
     result = persistence_service._get_parser_failure_provenance(exc)
-
     assert result == (
         parsing_service.TEXT_PARSER_NAME,
         parsing_service.TEXT_PARSER_VERSION,
@@ -128,9 +262,7 @@ def test_get_parser_failure_provenance_returns_none_for_generic_http_error() -> 
         status_code=415,
         detail="unsupported",
     )
-
     result = persistence_service._get_parser_failure_provenance(exc)
-
     assert result == (
         None,
         None,
@@ -142,13 +274,11 @@ async def test_persist_fetch_failure_creates_audit_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     ingestion_id, source_id = await persistence_service._persist_fetch_failure(
         session=_session(),
         url="https://example.com/",
@@ -161,24 +291,18 @@ async def test_persist_fetch_failure_creates_audit_record(
         error_code="timeout",
         error_message="URL fetch timed out",
     )
-
     assert (
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
     )
     assert source_id == repository.get_or_create_source.return_value.source_id
-
     repository.get_or_create_source.assert_awaited_once_with(
         url="https://example.com/",
     )
-
     repository.create_ingestion_record.assert_awaited_once()
-
     await_args = repository.create_ingestion_record.await_args
     assert await_args is not None
-
     kwargs = await_args.kwargs
-
     assert kwargs["ingestion_mode"] == "raw"
     assert kwargs["http_status"] is None
     assert kwargs["fetch_error_code"] == "timeout"
@@ -191,13 +315,11 @@ async def test_persist_fetch_failure_maps_database_error_to_503(
 ) -> None:
     repository = _repository_mock()
     repository.get_or_create_source.side_effect = SQLAlchemyError("database failed")
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service._persist_fetch_failure(
             session=_session(),
@@ -211,7 +333,6 @@ async def test_persist_fetch_failure_maps_database_error_to_503(
             error_code="timeout",
             error_message="URL fetch timed out",
         )
-
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Persistence unavailable"
 
@@ -221,27 +342,22 @@ async def test_ingest_url_persists_successful_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     response = _response(
         content=b"hello world",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=response),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     settings = Settings(
         max_preview_text_chars=5,
     )
-
     ingestion_id, source_id, preview = await persistence_service.ingest_url(
         url=_url(),
         client=httpx.AsyncClient(),
@@ -250,28 +366,22 @@ async def test_ingest_url_persists_successful_fetch(
         request_id="request-123",
         client_ip="127.0.0.1",
     )
-
     assert (
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
     )
     assert source_id == repository.get_or_create_source.return_value.source_id
-
     assert preview.status_code == 200
     assert preview.content_length == 11
     assert preview.preview == "hello"
-
     await_args = repository.create_ingestion_record.await_args
     assert await_args is not None
-
     kwargs = await_args.kwargs
-
     assert kwargs["ingestion_mode"] == "raw"
     assert kwargs["http_status"] == 200
     assert kwargs["final_url"] is None
     assert kwargs["retry_attempts"] == 0
     assert kwargs["request_id"] == "request-123"
-
     await response.aclose()
 
 
@@ -283,28 +393,23 @@ async def test_ingest_url_persists_expected_fetch_failure_and_reraises(
         status_code=504,
         detail="URL fetch timed out",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(side_effect=fetch_error),
     )
-
     persist_failure = AsyncMock()
-
     monkeypatch.setattr(
         persistence_service,
         "_persist_fetch_failure",
         persist_failure,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value is fetch_error
     persist_failure.assert_awaited_once()
 
@@ -318,14 +423,12 @@ async def test_ingest_url_maps_unexpected_fetch_failure_to_502(
         "fetch_url",
         AsyncMock(side_effect=RuntimeError("unexpected fetch error")),
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "URL fetch failed"
 
@@ -335,30 +438,25 @@ async def test_ingest_url_maps_database_failure_to_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     repository.get_or_create_source.side_effect = SQLAlchemyError(
         "database unavailable"
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=_response()),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Persistence unavailable"
 
@@ -368,12 +466,10 @@ async def test_ingest_parsed_url_persists_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     response = _response(
         content=b"<p>hello world</p>",
         content_type="text/html",
     )
-
     parsed = ParsedDocument(
         text="hello world",
         content_type="text/html",
@@ -383,29 +479,24 @@ async def test_ingest_parsed_url_persists_document(
         parser_name=parsing_service.HTML_PARSER_NAME,
         parser_version=parsing_service.HTML_PARSER_VERSION,
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=response),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(return_value=parsed),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     settings = Settings(
         max_preview_text_chars=5,
     )
-
     (
         ingestion_id,
         source_id,
@@ -418,7 +509,6 @@ async def test_ingest_parsed_url_persists_document(
         app_settings=settings,
         request_id="request-parse",
     )
-
     assert (
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
@@ -427,33 +517,24 @@ async def test_ingest_parsed_url_persists_document(
     assert (
         document_id == repository.create_parsed_document.return_value.parsed_document_id
     )
-
     assert preview.parsed_content_type == "text/html"
     assert preview.parsed_char_length == 11
     assert preview.parsed_preview == "hello"
-
     ingestion_await_args = repository.create_ingestion_record.await_args
     assert ingestion_await_args is not None
-
     ingestion_kwargs = ingestion_await_args.kwargs
-
     assert ingestion_kwargs["parser_name"] == parsing_service.HTML_PARSER_NAME
     assert ingestion_kwargs["parser_version"] == parsing_service.HTML_PARSER_VERSION
-
     repository.create_parsed_document.assert_awaited_once()
-
     document_await_args = repository.create_parsed_document.await_args
     assert document_await_args is not None
-
     document_kwargs = document_await_args.kwargs
-
     assert document_kwargs["content_type"] == "text/html"
     assert document_kwargs["char_length"] == 11
     assert document_kwargs["text_content"] == "hello world"
     assert document_kwargs["content_sha256"] == (
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     )
-
     await response.aclose()
 
 
@@ -466,14 +547,12 @@ async def test_ingest_parsed_url_maps_unexpected_fetch_failure_to_502(
         "fetch_url",
         AsyncMock(side_effect=RuntimeError("unexpected fetch error")),
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "URL fetch failed"
 
@@ -483,12 +562,10 @@ async def test_ingest_parsed_url_records_parse_failure_without_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     parse_error = HTTPException(
         status_code=415,
         detail="Unsupported content type",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
@@ -499,36 +576,28 @@ async def test_ingest_parsed_url_records_parse_failure_without_document(
             )
         ),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(side_effect=parse_error),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value is parse_error
-
     repository.create_ingestion_record.assert_awaited_once()
     repository.create_parsed_document.assert_not_awaited()
-
     await_args = repository.create_ingestion_record.await_args
     assert await_args is not None
-
     kwargs = await_args.kwargs
-
     assert kwargs["ingestion_mode"] == "parsed"
     assert kwargs["parser_name"] is None
     assert kwargs["parser_version"] is None
@@ -541,59 +610,47 @@ async def test_ingest_parsed_url_persists_known_parser_failure_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     parse_error = parsing_service.ParserHTTPException(
         status_code=400,
         detail=parsing_service.ERROR_PARSE_PDF_MALFORMED,
         parser_name=parsing_service.PDF_PARSER_NAME,
         parser_version=parsing_service.PDF_PARSER_VERSION,
     )
-
     response = _response(
         content=b"not a real pdf",
         content_type="application/pdf",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=response),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(side_effect=parse_error),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value is parse_error
-
     repository.create_ingestion_record.assert_awaited_once()
     repository.create_parsed_document.assert_not_awaited()
-
     await_args = repository.create_ingestion_record.await_args
     assert await_args is not None
-
     kwargs = await_args.kwargs
-
     assert kwargs["parser_name"] == parsing_service.PDF_PARSER_NAME
     assert kwargs["parser_version"] == parsing_service.PDF_PARSER_VERSION
     assert kwargs["parse_error_code"] is not None
     assert kwargs["parse_error_message"] is not None
-
     await response.aclose()
 
 
@@ -602,49 +659,40 @@ async def test_ingest_parsed_url_maps_parse_failure_audit_database_error_to_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     repository.get_or_create_source.side_effect = SQLAlchemyError(
         "database unavailable"
     )
-
     response = _response(
         content=b"hello",
         content_type="text/plain",
     )
-
     parse_error = HTTPException(
         status_code=415,
         detail="Unsupported content type",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=response),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(side_effect=parse_error),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Persistence unavailable"
-
     await response.aclose()
 
 
@@ -657,20 +705,17 @@ async def test_ingest_parsed_url_maps_unexpected_parse_error_to_502(
         "fetch_url",
         AsyncMock(return_value=_response()),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(side_effect=RuntimeError("unexpected parser failure")),
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "Document parsing failed"
 
@@ -683,36 +728,28 @@ async def test_ingest_parsed_url_persists_fetch_failure_and_reraises(
         status_code=504,
         detail="URL fetch timed out",
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(side_effect=fetch_error),
     )
-
     persist_failure = AsyncMock()
-
     monkeypatch.setattr(
         persistence_service,
         "_persist_fetch_failure",
         persist_failure,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value is fetch_error
     persist_failure.assert_awaited_once()
-
     await_args = persist_failure.await_args
     assert await_args is not None
-
     kwargs = await_args.kwargs
-
     assert kwargs["ingestion_mode"] == "parsed"
 
 
@@ -721,11 +758,9 @@ async def test_ingest_parsed_url_maps_persistence_failure_to_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     repository.get_or_create_source.side_effect = SQLAlchemyError(
         "database unavailable"
     )
-
     parsed = ParsedDocument(
         text="hello",
         content_type="text/plain",
@@ -735,31 +770,26 @@ async def test_ingest_parsed_url_maps_persistence_failure_to_503(
         parser_name=parsing_service.TEXT_PARSER_NAME,
         parser_version=parsing_service.TEXT_PARSER_VERSION,
     )
-
     monkeypatch.setattr(
         persistence_service,
         "fetch_url",
         AsyncMock(return_value=_response()),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "parse_document",
         AsyncMock(return_value=parsed),
     )
-
     monkeypatch.setattr(
         persistence_service,
         "IngestionRepository",
         lambda _session: repository,
     )
-
     with pytest.raises(HTTPException) as exc_info:
         await persistence_service.ingest_parsed_url(
             url=_url(),
             client=httpx.AsyncClient(),
             session=_session(),
         )
-
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Persistence unavailable"

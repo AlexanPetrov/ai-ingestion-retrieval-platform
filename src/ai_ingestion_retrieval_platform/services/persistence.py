@@ -1,7 +1,10 @@
 """Application workflows for fetching, parsing, and persisting URL ingestion."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Literal
 from uuid import UUID
 
 import httpx
@@ -14,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.content_identity import (
     calculate_content_sha256,
+)
+from ai_ingestion_retrieval_platform.core.metrics import (
+    PERSISTENCE_ERRORS_TOTAL,
+    PERSISTENCE_OPERATIONS_TOTAL,
+    PERSISTENCE_TRANSACTION_DURATION_SECONDS,
 )
 from ai_ingestion_retrieval_platform.persistence.repositories import (
     IngestionRepository,
@@ -37,6 +45,61 @@ from ai_ingestion_retrieval_platform.services.parsing import (
 
 logger = structlog.get_logger()
 
+PersistenceOperation = Literal[
+    "fetch_failure_audit",
+    "raw_ingestion",
+    "parse_failure_audit",
+    "parsed_ingestion",
+]
+
+
+@asynccontextmanager
+async def _persistence_transaction(
+    *,
+    session: AsyncSession,
+    operation: PersistenceOperation,
+) -> AsyncIterator[None]:
+    """Measure one service-owned database transaction.
+
+    The timer starts immediately before entering ``session.begin()`` and stops
+    only after the transaction context exits, so it includes commit or rollback
+    work while excluding upstream fetch and parser execution.
+    """
+    started_at = perf_counter()
+
+    try:
+        async with session.begin():
+            yield
+    except SQLAlchemyError:
+        PERSISTENCE_OPERATIONS_TOTAL.labels(
+            operation=operation,
+            result="failure",
+        ).inc()
+        PERSISTENCE_ERRORS_TOTAL.labels(
+            operation=operation,
+            error_type="sqlalchemy",
+        ).inc()
+        raise
+    except Exception:
+        PERSISTENCE_OPERATIONS_TOTAL.labels(
+            operation=operation,
+            result="failure",
+        ).inc()
+        PERSISTENCE_ERRORS_TOTAL.labels(
+            operation=operation,
+            error_type="unexpected",
+        ).inc()
+        raise
+    else:
+        PERSISTENCE_OPERATIONS_TOTAL.labels(
+            operation=operation,
+            result="success",
+        ).inc()
+    finally:
+        PERSISTENCE_TRANSACTION_DURATION_SECONDS.labels(
+            operation=operation,
+        ).observe(max(0.0, perf_counter() - started_at))
+
 
 def _elapsed_ms(started_at: float) -> int:
     """Return elapsed monotonic time in whole milliseconds."""
@@ -47,13 +110,11 @@ def _get_parser_failure_provenance(
     exc: HTTPException,
 ) -> tuple[str | None, str | None]:
     """Return parser provenance carried by an expected parser failure."""
-
     if isinstance(exc, ParserHTTPException):
         return (
             exc.parser_name,
             exc.parser_version,
         )
-
     return (
         None,
         None,
@@ -74,19 +135,19 @@ async def _persist_fetch_failure(
     error_message: str,
 ) -> tuple[UUID, UUID]:
     """Persist one failed fetch attempt.
-
     Failure auditing is itself part of persistent ingestion. If the database
     write fails, the endpoint reports a persistence failure rather than
     pretending the failed ingestion attempt was recorded.
     """
     repository = IngestionRepository(session)
-
     try:
-        async with session.begin():
+        async with _persistence_transaction(
+            session=session,
+            operation="fetch_failure_audit",
+        ):
             source = await repository.get_or_create_source(
                 url=url,
             )
-
             ingestion = await repository.create_ingestion_record(
                 source_id=source.source_id,
                 ingestion_mode=ingestion_mode,
@@ -105,12 +166,10 @@ async def _persist_fetch_failure(
                 retry_attempts=0,
                 fetched_at=datetime.now(UTC),
             )
-
         return (
             ingestion.ingestion_record_id,
             source.source_id,
         )
-
     except SQLAlchemyError as exc:
         logger.exception(
             "ingestion_failure_audit_persistence_failed",
@@ -135,22 +194,18 @@ async def ingest_url(
     batch_position: int | None = None,
 ) -> tuple[UUID, UUID, UrlIngestionPreview]:
     """Fetch one URL and persist the ingestion attempt.
-
     Network work completes before the database transaction begins so a slow
     upstream request does not hold a database transaction open.
     """
     settings = resolve_settings(app_settings)
     url_str = str(url)
-
     logger.info(
         "url_ingest_started",
         request_id=request_id,
         batch_id=str(batch_id) if batch_id is not None else None,
         batch_position=batch_position,
     )
-
     fetch_started_at = perf_counter()
-
     try:
         response = await fetch_url(
             client,
@@ -158,11 +213,9 @@ async def ingest_url(
             url_timeout=url_timeout,
             app_settings=settings,
         )
-
     except HTTPException as exc:
         fetch_elapsed_ms = _elapsed_ms(fetch_started_at)
         error = build_ingestion_error(exc)
-
         await _persist_fetch_failure(
             session=session,
             url=url_str,
@@ -175,7 +228,6 @@ async def ingest_url(
             error_code=error.code,
             error_message=error.message,
         )
-
         logger.warning(
             "url_ingest_fetch_failed",
             request_id=request_id,
@@ -185,7 +237,6 @@ async def ingest_url(
             fetch_elapsed_ms=fetch_elapsed_ms,
         )
         raise
-
     except Exception as exc:
         logger.exception(
             "url_ingest_fetch_failed_unexpectedly",
@@ -197,16 +248,16 @@ async def ingest_url(
             status_code=502,
             detail="URL fetch failed",
         ) from exc
-
     fetch_elapsed_ms = _elapsed_ms(fetch_started_at)
     repository = IngestionRepository(session)
-
     try:
-        async with session.begin():
+        async with _persistence_transaction(
+            session=session,
+            operation="raw_ingestion",
+        ):
             source = await repository.get_or_create_source(
                 url=url_str,
             )
-
             ingestion = await repository.create_ingestion_record(
                 source_id=source.source_id,
                 ingestion_mode="raw",
@@ -228,7 +279,6 @@ async def ingest_url(
                 retry_attempts=0,
                 fetched_at=datetime.now(UTC),
             )
-
     except SQLAlchemyError as exc:
         logger.exception(
             "url_ingest_persistence_failed",
@@ -240,7 +290,6 @@ async def ingest_url(
             status_code=503,
             detail="Persistence unavailable",
         ) from exc
-
     preview = UrlIngestionPreview(
         url=url_str,
         status_code=response.status_code,
@@ -249,7 +298,6 @@ async def ingest_url(
         elapsed_ms=float(fetch_elapsed_ms),
         preview=response.text[: settings.max_preview_text_chars],
     )
-
     logger.info(
         "url_ingest_completed",
         request_id=request_id,
@@ -257,7 +305,6 @@ async def ingest_url(
         source_id=str(source.source_id),
         fetch_elapsed_ms=fetch_elapsed_ms,
     )
-
     return (
         ingestion.ingestion_record_id,
         source.source_id,
@@ -277,26 +324,21 @@ async def ingest_parsed_url(
     batch_position: int | None = None,
 ) -> tuple[UUID, UUID, UUID, UrlParsedIngestionPreview]:
     """Fetch, parse, and persist one URL.
-
     Fetching and parsing happen before a database transaction is opened.
     Successful parsing creates the IngestionRecord and ParsedDocument in one
     atomic transaction.
-
     Parse failures create an IngestionRecord containing parser failure metadata
     but do not create a ParsedDocument.
     """
     settings = resolve_settings(app_settings)
     url_str = str(url)
-
     logger.info(
         "url_parse_ingest_started",
         request_id=request_id,
         batch_id=str(batch_id) if batch_id is not None else None,
         batch_position=batch_position,
     )
-
     fetch_started_at = perf_counter()
-
     try:
         response = await fetch_url(
             client,
@@ -306,11 +348,9 @@ async def ingest_parsed_url(
             allowed_content_types=settings.allowed_parse_content_types,
             app_settings=settings,
         )
-
     except HTTPException as exc:
         fetch_elapsed_ms = _elapsed_ms(fetch_started_at)
         error = build_ingestion_error(exc)
-
         await _persist_fetch_failure(
             session=session,
             url=url_str,
@@ -323,7 +363,6 @@ async def ingest_parsed_url(
             error_code=error.code,
             error_message=error.message,
         )
-
         logger.warning(
             "url_parse_ingest_fetch_failed",
             request_id=request_id,
@@ -333,7 +372,6 @@ async def ingest_parsed_url(
             fetch_elapsed_ms=fetch_elapsed_ms,
         )
         raise
-
     except Exception as exc:
         logger.exception(
             "url_parse_ingest_fetch_failed_unexpectedly",
@@ -345,10 +383,8 @@ async def ingest_parsed_url(
             status_code=502,
             detail="URL fetch failed",
         ) from exc
-
     fetch_elapsed_ms = _elapsed_ms(fetch_started_at)
     parse_started_at = perf_counter()
-
     try:
         parsed = await parse_document(
             ParseRequest(
@@ -360,20 +396,19 @@ async def ingest_parsed_url(
             ),
             settings=settings,
         )
-
     except HTTPException as exc:
         parse_elapsed_ms = _elapsed_ms(parse_started_at)
         error = build_ingestion_error(exc)
         parser_name, parser_version = _get_parser_failure_provenance(exc)
-
         repository = IngestionRepository(session)
-
         try:
-            async with session.begin():
+            async with _persistence_transaction(
+                session=session,
+                operation="parse_failure_audit",
+            ):
                 source = await repository.get_or_create_source(
                     url=url_str,
                 )
-
                 await repository.create_ingestion_record(
                     source_id=source.source_id,
                     ingestion_mode="parsed",
@@ -397,7 +432,6 @@ async def ingest_parsed_url(
                     parse_error_code=error.code,
                     parse_error_message=error.message,
                 )
-
         except SQLAlchemyError as db_exc:
             logger.exception(
                 "url_parse_failure_audit_persistence_failed",
@@ -409,7 +443,6 @@ async def ingest_parsed_url(
                 status_code=503,
                 detail="Persistence unavailable",
             ) from db_exc
-
         logger.warning(
             "url_parse_ingest_parse_failed",
             request_id=request_id,
@@ -419,7 +452,6 @@ async def ingest_parsed_url(
             parse_elapsed_ms=parse_elapsed_ms,
         )
         raise
-
     except Exception as exc:
         logger.exception(
             "url_parse_ingest_parse_failed_unexpectedly",
@@ -431,17 +463,17 @@ async def ingest_parsed_url(
             status_code=502,
             detail="Document parsing failed",
         ) from exc
-
     parse_elapsed_ms = _elapsed_ms(parse_started_at)
     content_sha256 = calculate_content_sha256(parsed.text)
     repository = IngestionRepository(session)
-
     try:
-        async with session.begin():
+        async with _persistence_transaction(
+            session=session,
+            operation="parsed_ingestion",
+        ):
             source = await repository.get_or_create_source(
                 url=url_str,
             )
-
             ingestion = await repository.create_ingestion_record(
                 source_id=source.source_id,
                 ingestion_mode="parsed",
@@ -465,7 +497,6 @@ async def ingest_parsed_url(
                 parse_error_code=None,
                 parse_error_message=None,
             )
-
             document = await repository.create_parsed_document(
                 ingestion_record_id=ingestion.ingestion_record_id,
                 content_type=parsed.content_type,
@@ -473,7 +504,6 @@ async def ingest_parsed_url(
                 text_content=parsed.text,
                 content_sha256=content_sha256,
             )
-
     except SQLAlchemyError as exc:
         logger.exception(
             "url_parse_ingest_persistence_failed",
@@ -485,7 +515,6 @@ async def ingest_parsed_url(
             status_code=503,
             detail="Persistence unavailable",
         ) from exc
-
     preview = UrlParsedIngestionPreview(
         url=url_str,
         status_code=response.status_code,
@@ -496,7 +525,6 @@ async def ingest_parsed_url(
         parsed_char_length=parsed.char_length,
         parsed_preview=parsed.text[: settings.max_preview_text_chars],
     )
-
     logger.info(
         "url_parse_ingest_completed",
         request_id=request_id,
@@ -506,7 +534,6 @@ async def ingest_parsed_url(
         fetch_elapsed_ms=fetch_elapsed_ms,
         parse_elapsed_ms=parse_elapsed_ms,
     )
-
     return (
         ingestion.ingestion_record_id,
         source.source_id,
