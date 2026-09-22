@@ -302,6 +302,11 @@ class ParsedDocument(Base):
         nullable=False,
     )
 
+    content_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -316,6 +321,10 @@ class ParsedDocument(Base):
         CheckConstraint(
             "char_length >= 0",
             name="ck_parsed_document_char_length",
+        ),
+        CheckConstraint(
+            "content_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_parsed_document_content_sha256",
         ),
         UniqueConstraint(
             "ingestion_record_id",

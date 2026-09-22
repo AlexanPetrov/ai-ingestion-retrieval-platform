@@ -9,14 +9,19 @@ import time
 
 import httpx
 import pytest
+from pydantic import AnyHttpUrl, TypeAdapter
 
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.schemas.ingestion import (
     UrlIngestionPreview,
     UrlParsedIngestionPreview,
 )
-from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
+from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument, ParseRequest
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
+
+
+def _url(value: str) -> AnyHttpUrl:
+    return TypeAdapter(AnyHttpUrl).validate_python(value)
 
 
 def _make_preview(url: str, elapsed_ms: float) -> UrlIngestionPreview:
@@ -52,7 +57,7 @@ async def test_single_preview_orchestration_baseline(
     latency_budget_seconds = 0.5
 
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -70,18 +75,19 @@ async def test_single_preview_orchestration_baseline(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    start = time.perf_counter()
+    async with httpx.AsyncClient() as client:
+        start = time.perf_counter()
 
-    results = [
-        await ingestion_service.preview_url(
-            url=f"https://example.com/item-{index}",
-            client=object(),
-            app_settings=runtime_settings,
-        )
-        for index in range(request_count)
-    ]
+        results = [
+            await ingestion_service.preview_url(
+                url=_url(f"https://example.com/item-{index}"),
+                client=client,
+                app_settings=runtime_settings,
+            )
+            for index in range(request_count)
+        ]
 
-    elapsed_seconds = time.perf_counter() - start
+        elapsed_seconds = time.perf_counter() - start
 
     assert len(results) == request_count
     assert all(result.status_code == 200 for result in results)
@@ -98,7 +104,7 @@ async def test_single_parsed_preview_orchestration_baseline(
     latency_budget_seconds = 0.5
 
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -115,8 +121,8 @@ async def test_single_parsed_preview_orchestration_baseline(
         )
 
     async def fake_parse_document(
-        request: object,
-        settings: object,
+        request: ParseRequest,
+        settings: Settings,
     ) -> ParsedDocument:
         return ParsedDocument(
             text="hello world",
@@ -124,23 +130,26 @@ async def test_single_parsed_preview_orchestration_baseline(
             source_url=request.source_url,
             byte_length=len(request.content),
             char_length=11,
+            parser_name="test-html-parser",
+            parser_version="test-1",
         )
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
     monkeypatch.setattr(ingestion_service, "parse_document", fake_parse_document)
 
-    start = time.perf_counter()
+    async with httpx.AsyncClient() as client:
+        start = time.perf_counter()
 
-    results = [
-        await ingestion_service.preview_parsed_url(
-            url=f"https://example.com/item-{index}",
-            client=object(),
-            app_settings=runtime_settings,
-        )
-        for index in range(request_count)
-    ]
+        results = [
+            await ingestion_service.preview_parsed_url(
+                url=_url(f"https://example.com/item-{index}"),
+                client=client,
+                app_settings=runtime_settings,
+            )
+            for index in range(request_count)
+        ]
 
-    elapsed_seconds = time.perf_counter() - start
+        elapsed_seconds = time.perf_counter() - start
 
     assert len(results) == request_count
     assert all(result.status_code == 200 for result in results)
@@ -157,28 +166,29 @@ async def test_batch_preview_orchestration_baseline(
     per_url_sleep_seconds = 0.01
     latency_budget_seconds = 0.3
 
-    urls = [f"https://example-{index}.test" for index in range(url_count)]
+    urls = [_url(f"https://example-{index}.test") for index in range(url_count)]
 
     async def fake_preview_url(
-        url: str,
-        _client: object,
+        url: AnyHttpUrl,
+        _client: httpx.AsyncClient,
         url_timeout: float | None = None,
         app_settings: Settings | None = None,
     ) -> UrlIngestionPreview:
         await asyncio.sleep(per_url_sleep_seconds)
-        return _make_preview(url, per_url_sleep_seconds * 1000)
+        return _make_preview(str(url), per_url_sleep_seconds * 1000)
 
     monkeypatch.setattr(ingestion_service, "preview_url", fake_preview_url)
 
-    start = time.perf_counter()
-    results = await ingestion_service.preview_urls(
-        urls=urls,
-        max_concurrency=max_concurrency,
-        client=object(),
-    )
-    elapsed_seconds = time.perf_counter() - start
+    async with httpx.AsyncClient() as client:
+        start = time.perf_counter()
+        results = await ingestion_service.preview_urls(
+            urls=urls,
+            max_concurrency=max_concurrency,
+            client=client,
+        )
+        elapsed_seconds = time.perf_counter() - start
 
-    assert [result.url for result in results] == urls
+    assert [result.url for result in results] == [str(url) for url in urls]
     assert all(result.success for result in results)
     assert elapsed_seconds < latency_budget_seconds
 
@@ -192,16 +202,16 @@ async def test_batch_parsed_preview_orchestration_baseline(
     per_url_sleep_seconds = 0.01
     latency_budget_seconds = 0.3
 
-    urls = [f"https://example-{index}.test" for index in range(url_count)]
+    urls = [_url(f"https://example-{index}.test") for index in range(url_count)]
 
     async def fake_preview_parsed_url(
-        url: str,
-        _client: object,
+        url: AnyHttpUrl,
+        _client: httpx.AsyncClient,
         url_timeout: float | None = None,
         app_settings: Settings | None = None,
     ) -> UrlParsedIngestionPreview:
         await asyncio.sleep(per_url_sleep_seconds)
-        return _make_parsed_preview(url, per_url_sleep_seconds * 1000)
+        return _make_parsed_preview(str(url), per_url_sleep_seconds * 1000)
 
     monkeypatch.setattr(
         ingestion_service,
@@ -209,15 +219,16 @@ async def test_batch_parsed_preview_orchestration_baseline(
         fake_preview_parsed_url,
     )
 
-    start = time.perf_counter()
-    results = await ingestion_service.preview_parsed_urls(
-        urls=urls,
-        max_concurrency=max_concurrency,
-        client=object(),
-    )
-    elapsed_seconds = time.perf_counter() - start
+    async with httpx.AsyncClient() as client:
+        start = time.perf_counter()
+        results = await ingestion_service.preview_parsed_urls(
+            urls=urls,
+            max_concurrency=max_concurrency,
+            client=client,
+        )
+        elapsed_seconds = time.perf_counter() - start
 
-    assert [result.url for result in results] == urls
+    assert [result.url for result in results] == [str(url) for url in urls]
     assert all(result.success for result in results)
     assert elapsed_seconds < latency_budget_seconds
 
@@ -231,36 +242,39 @@ async def test_batch_latency_is_dominated_by_slow_outlier(
     latency_slack_seconds = 0.15
 
     urls = [
-        "https://fast-1.test",
-        "https://fast-2.test",
-        "https://fast-3.test",
-        "https://slow.test",
+        _url("https://fast-1.test"),
+        _url("https://fast-2.test"),
+        _url("https://fast-3.test"),
+        _url("https://slow.test"),
     ]
 
     async def fake_preview_url(
-        url: str,
-        _client: object,
+        url: AnyHttpUrl,
+        _client: httpx.AsyncClient,
         url_timeout: float | None = None,
         app_settings: Settings | None = None,
     ) -> UrlIngestionPreview:
-        if "slow" in url:
+        url_str = str(url)
+
+        if "slow" in url_str:
             await asyncio.sleep(slow_sleep_seconds)
-            return _make_preview(url, slow_sleep_seconds * 1000)
+            return _make_preview(url_str, slow_sleep_seconds * 1000)
 
         await asyncio.sleep(fast_sleep_seconds)
-        return _make_preview(url, fast_sleep_seconds * 1000)
+        return _make_preview(url_str, fast_sleep_seconds * 1000)
 
     monkeypatch.setattr(ingestion_service, "preview_url", fake_preview_url)
 
-    start = time.perf_counter()
-    results = await ingestion_service.preview_urls(
-        urls=urls,
-        max_concurrency=4,
-        client=object(),
-    )
-    elapsed_seconds = time.perf_counter() - start
+    async with httpx.AsyncClient() as client:
+        start = time.perf_counter()
+        results = await ingestion_service.preview_urls(
+            urls=urls,
+            max_concurrency=4,
+            client=client,
+        )
+        elapsed_seconds = time.perf_counter() - start
 
-    assert [result.url for result in results] == urls
+    assert [result.url for result in results] == [str(url) for url in urls]
     assert all(result.success for result in results)
     assert elapsed_seconds >= slow_sleep_seconds
     assert elapsed_seconds < slow_sleep_seconds + latency_slack_seconds

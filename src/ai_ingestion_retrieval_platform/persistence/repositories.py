@@ -36,6 +36,14 @@ class ParsedDocumentResult:
     parsed_document_id: UUID
 
 
+@dataclass(frozen=True)
+class ParsedContentIdentityResult:
+    """Identity metadata for one successfully parsed persisted document."""
+
+    parsed_document_id: UUID
+    content_sha256: str
+
+
 class IngestionRepository:
     """Database operations for persisted ingestion workflows.
 
@@ -186,6 +194,7 @@ class IngestionRepository:
         content_type: str,
         char_length: int,
         text_content: str,
+        content_sha256: str,
     ) -> ParsedDocumentResult:
         """Persist successful parser output for one ingestion attempt.
 
@@ -197,6 +206,7 @@ class IngestionRepository:
             content_type: Normalized parsed document content type.
             char_length: Character count of the persisted text.
             text_content: Full admitted parser output.
+            content_sha256: SHA-256 of the exact UTF-8 encoded persisted text.
 
         Returns:
             ParsedDocumentResult containing the generated document identifier.
@@ -206,6 +216,7 @@ class IngestionRepository:
             content_type=content_type,
             char_length=char_length,
             text_content=text_content,
+            content_sha256=content_sha256,
         )
 
         self._session.add(document)
@@ -296,3 +307,61 @@ class IngestionRepository:
         result = await self._session.execute(statement)
 
         return result.scalar_one_or_none()
+
+    async def get_latest_parsed_content_identity_for_source(
+        self,
+        *,
+        source_id: UUID,
+    ) -> ParsedContentIdentityResult | None:
+        """Return identity metadata for the latest successful parse of a Source.
+
+        Raw ingestions, failed fetches, and failed parses are naturally excluded
+        because a successful ParsedDocument must exist. The explicit parsed-mode
+        predicate additionally protects the semantic contract against invalid
+        application data.
+
+        The latest successful parse is determined by ingestion timestamp. The
+        parsed-document creation timestamp and identifier provide deterministic
+        tie-breaking if timestamps are equal.
+
+        Args:
+            source_id: Stable Source whose latest successful parsed content is
+                requested.
+
+        Returns:
+            ParsedContentIdentityResult for the latest successful parse, or None
+            when the Source has no successfully persisted parsed document.
+        """
+        statement = (
+            select(
+                ParsedDocument.id,
+                ParsedDocument.content_sha256,
+            )
+            .join(
+                IngestionRecord,
+                ParsedDocument.ingestion_record_id == IngestionRecord.id,
+            )
+            .where(
+                IngestionRecord.source_id == source_id,
+                IngestionRecord.ingestion_mode == "parsed",
+            )
+            .order_by(
+                IngestionRecord.ingested_at.desc(),
+                ParsedDocument.created_at.desc(),
+                ParsedDocument.id.desc(),
+            )
+            .limit(1)
+        )
+
+        result = await self._session.execute(statement)
+        row = result.one_or_none()
+
+        if row is None:
+            return None
+
+        parsed_document_id, content_sha256 = row
+
+        return ParsedContentIdentityResult(
+            parsed_document_id=parsed_document_id,
+            content_sha256=content_sha256,
+        )

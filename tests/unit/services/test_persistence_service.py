@@ -20,6 +20,9 @@ from ai_ingestion_retrieval_platform.persistence.repositories import (
 )
 from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
 from ai_ingestion_retrieval_platform.services import (
+    parsing as parsing_service,
+)
+from ai_ingestion_retrieval_platform.services import (
     persistence as persistence_service,
 )
 
@@ -104,6 +107,36 @@ def test_elapsed_ms_never_returns_negative_value() -> None:
     assert result == 0
 
 
+def test_get_parser_failure_provenance_returns_known_parser() -> None:
+    exc = parsing_service.ParserHTTPException(
+        status_code=400,
+        detail="parse failed",
+        parser_name=parsing_service.TEXT_PARSER_NAME,
+        parser_version=parsing_service.TEXT_PARSER_VERSION,
+    )
+
+    result = persistence_service._get_parser_failure_provenance(exc)
+
+    assert result == (
+        parsing_service.TEXT_PARSER_NAME,
+        parsing_service.TEXT_PARSER_VERSION,
+    )
+
+
+def test_get_parser_failure_provenance_returns_none_for_generic_http_error() -> None:
+    exc = HTTPException(
+        status_code=415,
+        detail="unsupported",
+    )
+
+    result = persistence_service._get_parser_failure_provenance(exc)
+
+    assert result == (
+        None,
+        None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_persist_fetch_failure_creates_audit_record(
     monkeypatch: pytest.MonkeyPatch,
@@ -133,7 +166,6 @@ async def test_persist_fetch_failure_creates_audit_record(
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
     )
-
     assert source_id == repository.get_or_create_source.return_value.source_id
 
     repository.get_or_create_source.assert_awaited_once_with(
@@ -158,7 +190,6 @@ async def test_persist_fetch_failure_maps_database_error_to_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository_mock()
-
     repository.get_or_create_source.side_effect = SQLAlchemyError("database failed")
 
     monkeypatch.setattr(
@@ -224,7 +255,6 @@ async def test_ingest_url_persists_successful_fetch(
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
     )
-
     assert source_id == repository.get_or_create_source.return_value.source_id
 
     assert preview.status_code == 200
@@ -276,7 +306,6 @@ async def test_ingest_url_persists_expected_fetch_failure_and_reraises(
         )
 
     assert exc_info.value is fetch_error
-
     persist_failure.assert_awaited_once()
 
 
@@ -351,6 +380,8 @@ async def test_ingest_parsed_url_persists_document(
         source_url="https://example.com/",
         byte_length=len(response.content),
         char_length=11,
+        parser_name=parsing_service.HTML_PARSER_NAME,
+        parser_version=parsing_service.HTML_PARSER_VERSION,
     )
 
     monkeypatch.setattr(
@@ -392,9 +423,7 @@ async def test_ingest_parsed_url_persists_document(
         ingestion_id
         == repository.create_ingestion_record.return_value.ingestion_record_id
     )
-
     assert source_id == repository.get_or_create_source.return_value.source_id
-
     assert (
         document_id == repository.create_parsed_document.return_value.parsed_document_id
     )
@@ -402,6 +431,14 @@ async def test_ingest_parsed_url_persists_document(
     assert preview.parsed_content_type == "text/html"
     assert preview.parsed_char_length == 11
     assert preview.parsed_preview == "hello"
+
+    ingestion_await_args = repository.create_ingestion_record.await_args
+    assert ingestion_await_args is not None
+
+    ingestion_kwargs = ingestion_await_args.kwargs
+
+    assert ingestion_kwargs["parser_name"] == parsing_service.HTML_PARSER_NAME
+    assert ingestion_kwargs["parser_version"] == parsing_service.HTML_PARSER_VERSION
 
     repository.create_parsed_document.assert_awaited_once()
 
@@ -413,6 +450,9 @@ async def test_ingest_parsed_url_persists_document(
     assert document_kwargs["content_type"] == "text/html"
     assert document_kwargs["char_length"] == 11
     assert document_kwargs["text_content"] == "hello world"
+    assert document_kwargs["content_sha256"] == (
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    )
 
     await response.aclose()
 
@@ -490,8 +530,71 @@ async def test_ingest_parsed_url_records_parse_failure_without_document(
     kwargs = await_args.kwargs
 
     assert kwargs["ingestion_mode"] == "parsed"
+    assert kwargs["parser_name"] is None
+    assert kwargs["parser_version"] is None
     assert kwargs["parse_error_code"] is not None
     assert kwargs["parse_error_message"] is not None
+
+
+@pytest.mark.asyncio
+async def test_ingest_parsed_url_persists_known_parser_failure_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository_mock()
+
+    parse_error = parsing_service.ParserHTTPException(
+        status_code=400,
+        detail=parsing_service.ERROR_PARSE_PDF_MALFORMED,
+        parser_name=parsing_service.PDF_PARSER_NAME,
+        parser_version=parsing_service.PDF_PARSER_VERSION,
+    )
+
+    response = _response(
+        content=b"not a real pdf",
+        content_type="application/pdf",
+    )
+
+    monkeypatch.setattr(
+        persistence_service,
+        "fetch_url",
+        AsyncMock(return_value=response),
+    )
+
+    monkeypatch.setattr(
+        persistence_service,
+        "parse_document",
+        AsyncMock(side_effect=parse_error),
+    )
+
+    monkeypatch.setattr(
+        persistence_service,
+        "IngestionRepository",
+        lambda _session: repository,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await persistence_service.ingest_parsed_url(
+            url=_url(),
+            client=httpx.AsyncClient(),
+            session=_session(),
+        )
+
+    assert exc_info.value is parse_error
+
+    repository.create_ingestion_record.assert_awaited_once()
+    repository.create_parsed_document.assert_not_awaited()
+
+    await_args = repository.create_ingestion_record.await_args
+    assert await_args is not None
+
+    kwargs = await_args.kwargs
+
+    assert kwargs["parser_name"] == parsing_service.PDF_PARSER_NAME
+    assert kwargs["parser_version"] == parsing_service.PDF_PARSER_VERSION
+    assert kwargs["parse_error_code"] is not None
+    assert kwargs["parse_error_message"] is not None
+
+    await response.aclose()
 
 
 @pytest.mark.asyncio
@@ -603,7 +706,6 @@ async def test_ingest_parsed_url_persists_fetch_failure_and_reraises(
         )
 
     assert exc_info.value is fetch_error
-
     persist_failure.assert_awaited_once()
 
     await_args = persist_failure.await_args
@@ -630,6 +732,8 @@ async def test_ingest_parsed_url_maps_persistence_failure_to_503(
         source_url="https://example.com/",
         byte_length=5,
         char_length=5,
+        parser_name=parsing_service.TEXT_PARSER_NAME,
+        parser_version=parsing_service.TEXT_PARSER_VERSION,
     )
 
     monkeypatch.setattr(

@@ -12,6 +12,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_ingestion_retrieval_platform.core.config import Settings
+from ai_ingestion_retrieval_platform.core.content_identity import (
+    calculate_content_sha256,
+)
 from ai_ingestion_retrieval_platform.persistence.repositories import (
     IngestionRepository,
 )
@@ -27,7 +30,10 @@ from ai_ingestion_retrieval_platform.services.fetching import (
 from ai_ingestion_retrieval_platform.services.ingestion import (
     build_ingestion_error,
 )
-from ai_ingestion_retrieval_platform.services.parsing import parse_document
+from ai_ingestion_retrieval_platform.services.parsing import (
+    ParserHTTPException,
+    parse_document,
+)
 
 logger = structlog.get_logger()
 
@@ -35,6 +41,23 @@ logger = structlog.get_logger()
 def _elapsed_ms(started_at: float) -> int:
     """Return elapsed monotonic time in whole milliseconds."""
     return max(0, round((perf_counter() - started_at) * 1000))
+
+
+def _get_parser_failure_provenance(
+    exc: HTTPException,
+) -> tuple[str | None, str | None]:
+    """Return parser provenance carried by an expected parser failure."""
+
+    if isinstance(exc, ParserHTTPException):
+        return (
+            exc.parser_name,
+            exc.parser_version,
+        )
+
+    return (
+        None,
+        None,
+    )
 
 
 async def _persist_fetch_failure(
@@ -341,6 +364,8 @@ async def ingest_parsed_url(
     except HTTPException as exc:
         parse_elapsed_ms = _elapsed_ms(parse_started_at)
         error = build_ingestion_error(exc)
+        parser_name, parser_version = _get_parser_failure_provenance(exc)
+
         repository = IngestionRepository(session)
 
         try:
@@ -366,8 +391,8 @@ async def ingest_parsed_url(
                     fetch_error_message=None,
                     retry_attempts=0,
                     fetched_at=datetime.now(UTC),
-                    parser_name=None,
-                    parser_version=None,
+                    parser_name=parser_name,
+                    parser_version=parser_version,
                     parse_elapsed_ms=parse_elapsed_ms,
                     parse_error_code=error.code,
                     parse_error_message=error.message,
@@ -408,6 +433,7 @@ async def ingest_parsed_url(
         ) from exc
 
     parse_elapsed_ms = _elapsed_ms(parse_started_at)
+    content_sha256 = calculate_content_sha256(parsed.text)
     repository = IngestionRepository(session)
 
     try:
@@ -433,8 +459,8 @@ async def ingest_parsed_url(
                 fetch_error_message=None,
                 retry_attempts=0,
                 fetched_at=datetime.now(UTC),
-                parser_name=None,
-                parser_version=None,
+                parser_name=parsed.parser_name,
+                parser_version=parsed.parser_version,
                 parse_elapsed_ms=parse_elapsed_ms,
                 parse_error_code=None,
                 parse_error_message=None,
@@ -445,6 +471,7 @@ async def ingest_parsed_url(
                 content_type=parsed.content_type,
                 char_length=parsed.char_length,
                 text_content=parsed.text,
+                content_sha256=content_sha256,
             )
 
     except SQLAlchemyError as exc:

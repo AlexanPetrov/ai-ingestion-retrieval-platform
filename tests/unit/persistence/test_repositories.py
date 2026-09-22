@@ -79,9 +79,7 @@ async def test_create_ingestion_record_adds_and_flushes_record() -> None:
 
     async def assign_record_id() -> None:
         record = add_mock.call_args.args[0]
-
         assert isinstance(record, IngestionRecord)
-
         record.id = expected_record_id
 
     flush_mock.side_effect = assign_record_id
@@ -111,7 +109,6 @@ async def test_create_ingestion_record_adds_and_flushes_record() -> None:
     )
 
     assert result.ingestion_record_id == expected_record_id
-
     add_mock.assert_called_once()
     flush_mock.assert_awaited_once()
 
@@ -131,15 +128,14 @@ async def test_create_parsed_document_adds_and_flushes_document() -> None:
 
     ingestion_record_id = uuid4()
     expected_document_id = uuid4()
+    content_sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
     add_mock = _add_mock(session)
     flush_mock = _flush_mock(session)
 
     async def assign_document_id() -> None:
         document = add_mock.call_args.args[0]
-
         assert isinstance(document, ParsedDocument)
-
         document.id = expected_document_id
 
     flush_mock.side_effect = assign_document_id
@@ -149,10 +145,10 @@ async def test_create_parsed_document_adds_and_flushes_document() -> None:
         content_type="text/plain",
         char_length=5,
         text_content="hello",
+        content_sha256=content_sha256,
     )
 
     assert result.parsed_document_id == expected_document_id
-
     add_mock.assert_called_once()
     flush_mock.assert_awaited_once()
 
@@ -163,6 +159,7 @@ async def test_create_parsed_document_adds_and_flushes_document() -> None:
     assert document.content_type == "text/plain"
     assert document.char_length == 5
     assert document.text_content == "hello"
+    assert document.content_sha256 == content_sha256
 
 
 @pytest.mark.asyncio
@@ -243,7 +240,6 @@ async def test_get_ingestion_records_by_batch_id_returns_records() -> None:
     repository = IngestionRepository(session)
 
     batch_id = uuid4()
-
     first = MagicMock(spec=IngestionRecord)
     second = MagicMock(spec=IngestionRecord)
 
@@ -264,7 +260,6 @@ async def test_get_ingestion_records_by_batch_id_returns_records() -> None:
         first,
         second,
     ]
-
     execute_mock.assert_awaited_once()
 
 
@@ -309,4 +304,51 @@ async def test_get_parsed_document_for_ingestion_returns_document() -> None:
     )
 
     assert result is document
+    execute_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_latest_parsed_content_identity_for_source_returns_latest() -> None:
+    session = _mock_session()
+    repository = IngestionRepository(session)
+
+    source_id = uuid4()
+    parsed_document_id = uuid4()
+    content_sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+    result_mock = MagicMock()
+    result_mock.one_or_none.return_value = (
+        parsed_document_id,
+        content_sha256,
+    )
+
+    execute_mock = _execute_mock(session)
+    execute_mock.return_value = result_mock
+
+    result = await repository.get_latest_parsed_content_identity_for_source(
+        source_id=source_id,
+    )
+
+    assert result is not None
+    assert result.parsed_document_id == parsed_document_id
+    assert result.content_sha256 == content_sha256
+    execute_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_latest_parsed_content_identity_for_source_returns_none() -> None:
+    session = _mock_session()
+    repository = IngestionRepository(session)
+
+    result_mock = MagicMock()
+    result_mock.one_or_none.return_value = None
+
+    execute_mock = _execute_mock(session)
+    execute_mock.return_value = result_mock
+
+    result = await repository.get_latest_parsed_content_identity_for_source(
+        source_id=uuid4(),
+    )
+
+    assert result is None
     execute_mock.assert_awaited_once()

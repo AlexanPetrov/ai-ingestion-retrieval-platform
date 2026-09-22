@@ -4,11 +4,11 @@ Production-grade asynchronous ingestion platform built with FastAPI, secure outb
 
 **Current status: Stage 3.5 in progress — Production Hardening / Operationalization**
 
-Stages 1–3 are complete. The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, parsing, transaction handling, persistence, schema migration, readiness behavior, real PostgreSQL integration testing, and shell-only administrative read/write tooling are implemented.
+Stages 1–3 are complete. The platform supports both preview-only ingestion and durable PostgreSQL-backed ingestion for single URLs and batches. Secure fetching, bounded parsing, deterministic parsed-content identity, parser provenance, transaction handling, persistence, schema migration, readiness behavior, real PostgreSQL integration testing, and shell-only administrative read/write tooling are implemented.
 
 The administrative CLI supports database statistics, source/ingestion/document inspection, ingestion deletion, restricted source deletion, and full application-data purge with explicit destructive-operation confirmation.
 
-**Next Stage 3.5 work: remaining persistence operational hardening, metadata semantics, persistence-specific metrics, and final architecture/operations documentation before Stage 4.**
+**Next Stage 3.5 work: persistence-specific observability, final architecture/operations documentation, and the final hardening verification checkpoint before Stage 4.**
 
 **Stage 4 — Indexing and Retrieval** remains planned but is **not implemented yet**.
 
@@ -72,6 +72,10 @@ The administrative CLI supports database statistics, source/ingestion/document i
 - Stable source identity by URL
 - Immutable ingestion-attempt history
 - Successful parsed-document storage
+- Deterministic SHA-256 identity for exact persisted parsed text
+- Migration-backed hash backfill for pre-existing parsed documents
+- Authoritative parser name/version propagation for successful parses
+- Parser provenance retention on expected parser failures after parser selection
 - Request and batch correlation metadata
 - Batch ordering persisted through `batch_position`
 - Database-aware readiness checks
@@ -124,6 +128,8 @@ An independent parsed-document delete command is intentionally not exposed. Pars
 - Application lifespan integration tests
 - Real PostgreSQL integration tests
 - Administrative repository/service/CLI tests
+- Parsed-content identity and migration-backfill tests
+- Parser-provenance unit and real PostgreSQL/API integration tests
 - Coverage enforcement
 - Alembic model/schema drift detection
 - Performance baseline tests
@@ -162,6 +168,7 @@ Ingestion orchestration
   |      |
   |      +--> parsed Content-Type admission
   |      +--> byte-level sniffing
+  |      +--> parser selection + provenance
   |      +--> parser timeout
   |      +--> byte/page/text limits
   |
@@ -595,7 +602,7 @@ It stores audit and execution metadata including:
 - fetch error code/message
 - retry-attempt field
 - fetched timestamp
-- parser metadata fields
+- parser name/version provenance
 - parse elapsed time
 - parse error code/message
 - ingestion timestamp
@@ -612,9 +619,14 @@ It stores:
 - parsed content type
 - parsed character length
 - full bounded parsed text
+- `content_sha256` for exact persisted text identity
 - creation timestamp
 
 At most one `ParsedDocument` may exist for an `IngestionRecord`.
+
+`content_sha256` is defined as SHA-256 of the exact persisted `text_content` encoded as UTF-8. No whitespace, Unicode, newline, case, or other normalization is applied before hashing. The hash is an identity signal, not a uniqueness constraint: the same hash may legitimately appear on multiple ingestion records or sources, and ingestion history is never deduplicated by content hash.
+
+The persistence repository can retrieve the latest successful parsed-content identity for a source while ignoring raw and failed ingestion attempts. The content-identity helper classifies a current hash relative to that successful baseline as `new`, `unchanged`, or `changed`; the classification does not remove or collapse ingestion history.
 
 The API returns a configured preview, while persistence stores the parser's full bounded text output up to the configured parsing limit.
 
@@ -628,6 +640,7 @@ PostgreSQL constraints enforce important persistence semantics, including:
 - unique `(batch_id, batch_position)` combinations
 - non-negative bounded metadata where applicable
 - at most one parsed document per ingestion
+- non-null lowercase 64-character SHA-256 identity on parsed documents
 - restricted source deletion while ingestion history exists
 - parsed-document cascade when its ingestion record is deleted
 
@@ -687,6 +700,16 @@ Parser work is bounded by configurable:
 - PDF page limit
 - parser timeout
 
+Successful parser output now carries required provenance:
+
+| Content type | Parser identity | Version semantics |
+|---|---|---|
+| `text/plain` | `python-utf8-replace` | adapter revision plus Python runtime version |
+| `text/html` | `beautifulsoup4-html.parser` | adapter revision plus Beautiful Soup and Python runtime versions |
+| `application/pdf` | `pypdf` | adapter revision plus pypdf version |
+
+The explicit adapter revision versions the project's own extraction behavior independently of dependency releases. Successful persisted parsed ingestion stores this provenance on `IngestionRecord`. Expected parser failures also retain the selected parser name/version when parser selection occurred before the failure. If no parser was selected, such as for an unsupported content type, parser provenance remains unset rather than being fabricated.
+
 OCR, office-document parsing, image extraction, and media transcription are not currently implemented.
 
 ### Transaction Semantics
@@ -734,6 +757,7 @@ fetch success + parse success
 
 fetch success + expected parse failure
     -> Source + IngestionRecord
+    -> selected parser provenance persisted when known
     -> no ParsedDocument
     -> original parse HTTP error returned
 
@@ -761,10 +785,10 @@ The following fields are intentionally not populated with invented values:
 
 - final canonical URL
 - authoritative retry-attempt count
-- parser name
-- parser version
 
-Until those contracts are extended, the persistence layer keeps these values unset/defaulted rather than presenting guessed metadata as factual audit data.
+Parser name/version are no longer general metadata gaps. They are populated from the parser boundary for successful parses and for expected parse failures after a parser has been selected. They remain unset only when no parser identity is truthfully available.
+
+Until the remaining upstream contracts are extended, the persistence layer keeps unavailable values unset/defaulted rather than presenting guessed metadata as factual audit data.
 
 The administrative CLI follows the same rule and displays the actual persisted value, including unset/default values where appropriate.
 
@@ -980,6 +1004,8 @@ Always review generated migrations before applying them.
 
 Autogenerate is a migration authoring aid, not a substitute for migration review.
 
+Current persistence migrations include the initial ingestion schema plus `e13f6c2d9a71_add_parsed_document_content_sha256.py`, which backfills SHA-256 identity for existing parsed documents before enforcing the non-null hash constraint.
+
 ### Deployment expectation
 
 For an environment using persistence, migrations should be applied as an explicit release/deployment step **before** serving persisted ingestion traffic.
@@ -1192,7 +1218,7 @@ Metrics include:
 
 Request metric paths are normalized to avoid high-cardinality labels.
 
-Persistence-specific administrative metrics are not yet implemented.
+Persistence-specific operation, error, and transaction-duration metrics are not yet implemented.
 
 ---
 
@@ -1318,6 +1344,8 @@ Real database semantics are tested in:
 ```text
 tests/integration/persistence/
 ├── conftest.py
+├── test_content_sha256_migration.py
+├── test_parser_provenance.py
 └── test_postgres_persistence.py
 ```
 
@@ -1333,6 +1361,10 @@ The PostgreSQL integration layer verifies behavior that mocks cannot establish r
 - source delete restriction
 - parsed-document cascade behavior
 - transaction rollback
+- parsed-content SHA-256 migration backfill and constraint enforcement
+- latest successful parsed-content identity semantics
+- parser provenance on successful parsed ingestion
+- parser provenance retention on expected parser failure with no document row
 
 Administrative destructive operations have also been manually smoke-tested against PostgreSQL:
 
@@ -1411,7 +1443,7 @@ uv run pytest
 ### Running the PostgreSQL integration layer explicitly
 
 ```bash
-uv run pytest   tests/integration/persistence/test_postgres_persistence.py   --no-cov -v
+uv run pytest tests/integration/persistence/ --no-cov -v
 ```
 
 ### Full verification gate
@@ -1426,17 +1458,18 @@ uv run pytest
 uv run alembic check
 ```
 
-Current verified baseline:
+Current tested baseline after content identity and parser-provenance hardening:
 
 ```text
-387 passed
-96.41% total test coverage
-Ruff clean
-Pyright 1.1.413: 0 errors, 0 warnings, 0 informations
+409 passed
+96.49% total test coverage
+Ruff lint: clean
+Pyright 1.1.414: 0 errors, 0 warnings, 0 informations
 Administrative repository coverage: 100%
 Administrative service coverage: 99%
 Alembic check: No new upgrade operations detected.
 ```
+
 
 The coverage requirement is currently:
 
@@ -1458,7 +1491,8 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 │   ├── env.py
 │   ├── script.py.mako
 │   └── versions/
-│       └── 4eb7669e862c_create_ingestion_persistence_schema.py
+│       ├── 4eb7669e862c_create_ingestion_persistence_schema.py
+│       └── e13f6c2d9a71_add_parsed_document_content_sha256.py
 ├── alembic.ini
 ├── generate_token.py
 ├── pyproject.toml
@@ -1485,6 +1519,7 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 │       ├── core/
 │       │   ├── __init__.py
 │       │   ├── config.py
+│       │   ├── content_identity.py
 │       │   ├── content_sniffing.py
 │       │   ├── limits.py
 │       │   ├── logging.py
@@ -1528,6 +1563,8 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 │   │   │   └── test_lifespan.py
 │   │   └── persistence/
 │   │       ├── conftest.py
+│   │       ├── test_content_sha256_migration.py
+│   │       ├── test_parser_provenance.py
 │   │       └── test_postgres_persistence.py
 │   ├── performance/
 │   │   └── test_ingestion_latency.py
@@ -1540,6 +1577,7 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 │       │       └── test_rate_limit.py
 │       ├── core/
 │       │   ├── test_config.py
+│       │   ├── test_content_identity.py
 │       │   ├── test_content_sniffing.py
 │       │   ├── test_response_admission.py
 │       │   └── test_url_safety.py
@@ -1565,7 +1603,7 @@ Generated `__pycache__` directories, compiled Python files, and personal/local a
 ### Code ownership by layer
 
 - `api/` — HTTP transport, dependencies, and route contracts
-- `core/` — configuration, limits, URL safety, and observability primitives
+- `core/` — configuration, limits, URL safety, content identity, and observability primitives
 - `middleware/` — request lifecycle logging and request ID propagation
 - `persistence/` — SQLAlchemy engine, models, ingestion repository, and administrative read/write repository
 - `schemas/` — request/response and persistence schema validation
@@ -1724,14 +1762,18 @@ Implemented:
 - administrative write commit/rollback ownership
 - focused repository/service/CLI coverage
 - real PostgreSQL smoke verification for destructive operations
-- Pyright 1.1.413 verification
-- production verification baseline of 387 passing tests and 96.41% coverage
+- deterministic parsed-content SHA-256 identity over exact persisted UTF-8 text
+- migration backfill and database constraint for `ParsedDocument.content_sha256`
+- latest successful parsed-content identity lookup and `new` / `unchanged` / `changed` classification semantics
+- authoritative parser identity/version propagation from parser boundary through persistence
+- parser provenance retention on expected parser failures after parser selection
+- real PostgreSQL/API verification of successful and failed parser provenance persistence
+- Pyright 1.1.414 verification
+- tested baseline of 409 passing tests and 96.49% coverage
 
 Planned remaining work:
 
-- parsed-content hash/version semantics
-- authoritative parser identity/version propagation
-- persistence-specific metrics
+- persistence operation/error counters and transaction-duration metrics
 - additional architecture and operations documentation
 - final hardening verification before Stage 4
 

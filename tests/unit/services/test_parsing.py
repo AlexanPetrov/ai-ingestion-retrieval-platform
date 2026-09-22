@@ -48,6 +48,8 @@ async def test_parse_document_parses_plain_text() -> None:
     assert result.source_url == "https://example.com/file.txt"
     assert result.byte_length == 12
     assert result.char_length == 12
+    assert result.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert result.parser_version == parsing_service.TEXT_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -62,6 +64,8 @@ async def test_parse_document_normalizes_content_type_with_charset() -> None:
 
     assert result.content_type == "text/plain"
     assert result.text == "hello"
+    assert result.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert result.parser_version == parsing_service.TEXT_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -77,6 +81,8 @@ async def test_parse_document_truncates_parsed_text() -> None:
     assert result.text == "abc"
     assert result.byte_length == 6
     assert result.char_length == 3
+    assert result.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert result.parser_version == parsing_service.TEXT_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -99,6 +105,8 @@ async def test_parse_document_extracts_readable_html_text() -> None:
     assert result.text == "Hello\nReadable text"
     assert "alert" not in result.text
     assert "display:none" not in result.text
+    assert result.parser_name == parsing_service.HTML_PARSER_NAME
+    assert result.parser_version == parsing_service.HTML_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -113,6 +121,8 @@ async def test_parse_document_truncates_html_text() -> None:
 
     assert result.text == "abc"
     assert result.char_length == 3
+    assert result.parser_name == parsing_service.HTML_PARSER_NAME
+    assert result.parser_version == parsing_service.HTML_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -133,6 +143,8 @@ async def test_parse_document_parses_pdf_text() -> None:
     assert result.source_url == "https://example.com/file.pdf"
     assert result.byte_length == len(pdf_bytes)
     assert result.char_length == len(result.text)
+    assert result.parser_name == parsing_service.PDF_PARSER_NAME
+    assert result.parser_version == parsing_service.PDF_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -150,6 +162,12 @@ async def test_parse_document_rejects_pdf_over_page_limit() -> None:
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == parsing_service.ERROR_PARSE_PDF_TOO_MANY_PAGES
+    assert isinstance(
+        exc_info.value,
+        parsing_service.ParserHTTPException,
+    )
+    assert exc_info.value.parser_name == parsing_service.PDF_PARSER_NAME
+    assert exc_info.value.parser_version == parsing_service.PDF_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -165,6 +183,12 @@ async def test_parse_document_rejects_malformed_pdf() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == parsing_service.ERROR_PARSE_PDF_MALFORMED
+    assert isinstance(
+        exc_info.value,
+        parsing_service.ParserHTTPException,
+    )
+    assert exc_info.value.parser_name == parsing_service.PDF_PARSER_NAME
+    assert exc_info.value.parser_version == parsing_service.PDF_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -181,6 +205,8 @@ async def test_parse_document_truncates_pdf_text() -> None:
 
     assert result.text == "hello"
     assert result.char_length == 5
+    assert result.parser_name == parsing_service.PDF_PARSER_NAME
+    assert result.parser_version == parsing_service.PDF_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -196,6 +222,12 @@ async def test_parse_document_rejects_unsupported_content_type() -> None:
 
     assert exc_info.value.status_code == 415
     assert exc_info.value.detail == parsing_service.ERROR_PARSE_CONTENT_TYPE_UNSUPPORTED
+    assert isinstance(
+        exc_info.value,
+        parsing_service.ParserHTTPException,
+    )
+    assert exc_info.value.parser_name is None
+    assert exc_info.value.parser_version is None
 
 
 @pytest.mark.asyncio
@@ -211,6 +243,12 @@ async def test_parse_document_rejects_oversized_content() -> None:
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == parsing_service.ERROR_PARSE_CONTENT_TOO_LARGE
+    assert isinstance(
+        exc_info.value,
+        parsing_service.ParserHTTPException,
+    )
+    assert exc_info.value.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert exc_info.value.parser_version == parsing_service.TEXT_PARSER_VERSION
 
 
 @pytest.mark.asyncio
@@ -221,6 +259,7 @@ async def test_parse_document_times_out(
         "content_type": "text/plain",
         "result": "timeout",
     }
+
     before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
@@ -236,7 +275,11 @@ async def test_parse_document_times_out(
         time.sleep(0.05)
         return None
 
-    monkeypatch.setattr(parsing_service, "_parse_document_sync", slow_parse)
+    monkeypatch.setattr(
+        parsing_service,
+        "_parse_document_sync",
+        slow_parse,
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await parsing_service.parse_document(
@@ -255,6 +298,12 @@ async def test_parse_document_times_out(
 
     assert exc_info.value.status_code == 504
     assert exc_info.value.detail == parsing_service.ERROR_PARSE_TIMEOUT
+    assert isinstance(
+        exc_info.value,
+        parsing_service.ParserHTTPException,
+    )
+    assert exc_info.value.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert exc_info.value.parser_version == parsing_service.TEXT_PARSER_VERSION
     assert after - before == pytest.approx(1.0)
 
 
@@ -270,15 +319,22 @@ async def test_parse_document_uses_thread_boundary(
     ) -> object:
         captured["func"] = func
         captured["args"] = args
+
         return parsing_service.ParsedDocument(
             text="ok",
             content_type="text/plain",
             source_url=None,
             byte_length=2,
             char_length=2,
+            parser_name=parsing_service.TEXT_PARSER_NAME,
+            parser_version=parsing_service.TEXT_PARSER_VERSION,
         )
 
-    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        asyncio,
+        "to_thread",
+        fake_to_thread,
+    )
 
     result = await parsing_service.parse_document(
         ParseRequest(
@@ -289,6 +345,8 @@ async def test_parse_document_uses_thread_boundary(
     )
 
     assert result.text == "ok"
+    assert result.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert result.parser_version == parsing_service.TEXT_PARSER_VERSION
     assert captured["func"] is parsing_service._parse_document_sync
 
 
@@ -298,23 +356,29 @@ async def test_parse_document_records_success_metrics() -> None:
         "content_type": "text/plain",
         "result": "success",
     }
-    content_type_labels = {"content_type": "text/plain"}
+
+    content_type_labels = {
+        "content_type": "text/plain",
+    }
 
     requests_before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
         request_labels,
     )
+
     duration_before = _metric_sample_value(
         PARSER_DURATION_SECONDS,
         "parser_duration_seconds_count",
         content_type_labels,
     )
+
     input_bytes_before = _metric_sample_value(
         PARSER_INPUT_BYTES,
         "parser_input_bytes_sum",
         content_type_labels,
     )
+
     extracted_chars_before = _metric_sample_value(
         PARSER_EXTRACTED_CHARS,
         "parser_extracted_chars_sum",
@@ -334,16 +398,19 @@ async def test_parse_document_records_success_metrics() -> None:
         "parser_requests_total",
         request_labels,
     )
+
     duration_after = _metric_sample_value(
         PARSER_DURATION_SECONDS,
         "parser_duration_seconds_count",
         content_type_labels,
     )
+
     input_bytes_after = _metric_sample_value(
         PARSER_INPUT_BYTES,
         "parser_input_bytes_sum",
         content_type_labels,
     )
+
     extracted_chars_after = _metric_sample_value(
         PARSER_EXTRACTED_CHARS,
         "parser_extracted_chars_sum",
@@ -351,6 +418,9 @@ async def test_parse_document_records_success_metrics() -> None:
     )
 
     assert result.text == "hello"
+    assert result.parser_name == parsing_service.TEXT_PARSER_NAME
+    assert result.parser_version == parsing_service.TEXT_PARSER_VERSION
+
     assert requests_after - requests_before == pytest.approx(1.0)
     assert duration_after - duration_before == pytest.approx(1.0)
     assert input_bytes_after - input_bytes_before == pytest.approx(5.0)
@@ -363,6 +433,7 @@ async def test_parse_document_records_unsupported_content_type_metrics() -> None
         "content_type": "unsupported",
         "result": "unsupported_content_type",
     }
+
     before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
@@ -393,6 +464,7 @@ async def test_parse_document_records_missing_content_type_metrics() -> None:
         "content_type": "missing",
         "result": "unsupported_content_type",
     }
+
     before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
@@ -423,6 +495,7 @@ async def test_parse_document_records_oversized_content_metrics() -> None:
         "content_type": "text/plain",
         "result": "too_large",
     }
+
     before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
@@ -455,6 +528,7 @@ async def test_parse_document_records_unexpected_error_metrics(
         "content_type": "text/plain",
         "result": "error",
     }
+
     before = _metric_sample_value(
         PARSER_REQUESTS_TOTAL,
         "parser_requests_total",
@@ -467,9 +541,16 @@ async def test_parse_document_records_unexpected_error_metrics(
     ) -> object:
         raise RuntimeError("unexpected parser failure")
 
-    monkeypatch.setattr(parsing_service, "_parse_document_sync", failing_parse)
+    monkeypatch.setattr(
+        parsing_service,
+        "_parse_document_sync",
+        failing_parse,
+    )
 
-    with pytest.raises(RuntimeError, match="unexpected parser failure"):
+    with pytest.raises(
+        RuntimeError,
+        match="unexpected parser failure",
+    ):
         await parsing_service.parse_document(
             ParseRequest(
                 content=b"hello",

@@ -2,11 +2,13 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
 from fastapi import HTTPException
-from tenacity import stop_after_attempt, wait_none
+from pydantic import AnyHttpUrl, TypeAdapter
+from tenacity import RetryCallState, stop_after_attempt, wait_none
 
 from ai_ingestion_retrieval_platform.core.config import Settings
 from ai_ingestion_retrieval_platform.core.content_sniffing import (
@@ -19,9 +21,13 @@ from ai_ingestion_retrieval_platform.core.response_admission import (
     ERROR_DECLARED_CONTENT_TOO_LARGE,
 )
 from ai_ingestion_retrieval_platform.core.url_safety import SafeFetchTarget
-from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument
+from ai_ingestion_retrieval_platform.schemas.parsing import ParsedDocument, ParseRequest
 from ai_ingestion_retrieval_platform.services import fetching as fetching_service
 from ai_ingestion_retrieval_platform.services import ingestion as ingestion_service
+
+
+def _url(value: str) -> AnyHttpUrl:
+    return TypeAdapter(AnyHttpUrl).validate_python(value)
 
 
 async def _allow_all_urls(
@@ -509,11 +515,14 @@ def test_get_retry_wait_seconds_uses_retry_after_for_429() -> None:
         response=response,
     )
 
-    retry_state = SimpleNamespace(
-        outcome=SimpleNamespace(exception=lambda: exception),
-        attempt_number=1,
-        args=(),
-        kwargs={"app_settings": runtime_settings},
+    retry_state = cast(
+        RetryCallState,
+        SimpleNamespace(
+            outcome=SimpleNamespace(exception=lambda: exception),
+            attempt_number=1,
+            args=(),
+            kwargs={"app_settings": runtime_settings},
+        ),
     )
 
     result = fetching_service.get_retry_wait_seconds(retry_state)
@@ -536,11 +545,14 @@ def test_get_retry_wait_seconds_falls_back_when_retry_after_invalid(
         response=response,
     )
 
-    retry_state = SimpleNamespace(
-        outcome=SimpleNamespace(exception=lambda: exception),
-        attempt_number=1,
-        args=(),
-        kwargs={"app_settings": Settings()},
+    retry_state = cast(
+        RetryCallState,
+        SimpleNamespace(
+            outcome=SimpleNamespace(exception=lambda: exception),
+            attempt_number=1,
+            args=(),
+            kwargs={"app_settings": Settings()},
+        ),
     )
 
     monkeypatch.setattr(
@@ -560,23 +572,32 @@ def test_should_stop_retry_uses_app_scoped_attempt_and_time_budgets() -> None:
         retry_total_timeout_seconds=2.0,
     )
 
-    active_state = SimpleNamespace(
-        args=(),
-        kwargs={"app_settings": runtime_settings},
-        attempt_number=2,
-        seconds_since_start=1.0,
+    active_state = cast(
+        RetryCallState,
+        SimpleNamespace(
+            args=(),
+            kwargs={"app_settings": runtime_settings},
+            attempt_number=2,
+            seconds_since_start=1.0,
+        ),
     )
-    attempts_exhausted_state = SimpleNamespace(
-        args=(),
-        kwargs={"app_settings": runtime_settings},
-        attempt_number=3,
-        seconds_since_start=1.0,
+    attempts_exhausted_state = cast(
+        RetryCallState,
+        SimpleNamespace(
+            args=(),
+            kwargs={"app_settings": runtime_settings},
+            attempt_number=3,
+            seconds_since_start=1.0,
+        ),
     )
-    time_exhausted_state = SimpleNamespace(
-        args=(),
-        kwargs={"app_settings": runtime_settings},
-        attempt_number=1,
-        seconds_since_start=2.0,
+    time_exhausted_state = cast(
+        RetryCallState,
+        SimpleNamespace(
+            args=(),
+            kwargs={"app_settings": runtime_settings},
+            attempt_number=1,
+            seconds_since_start=2.0,
+        ),
     )
 
     assert fetching_service.should_stop_retry(active_state) is False
@@ -664,7 +685,7 @@ async def test_preview_url_returns_expected_preview_payload(
     runtime_settings = Settings(max_preview_text_chars=4)
 
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         _url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -682,13 +703,14 @@ async def test_preview_url_returns_expected_preview_payload(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    result = await ingestion_service.preview_url(
-        url="https://example.com",
-        client=object(),
-        app_settings=runtime_settings,
-    )
+    async with httpx.AsyncClient() as client:
+        result = await ingestion_service.preview_url(
+            url=_url("https://example.com"),
+            client=client,
+            app_settings=runtime_settings,
+        )
 
-    assert result.url == "https://example.com"
+    assert result.url == "https://example.com/"
     assert result.status_code == 200
     assert result.content_type == "text/plain"
     assert result.content_length == 6
@@ -707,7 +729,7 @@ async def test_preview_parsed_url_returns_expected_preview_payload(
     captured: dict[str, object] = {}
 
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -731,8 +753,8 @@ async def test_preview_parsed_url_returns_expected_preview_payload(
         )
 
     async def fake_parse_document(
-        request: object,
-        settings: object,
+        request: ParseRequest,
+        settings: Settings,
     ) -> ParsedDocument:
         captured["parse_content"] = request.content
         captured["parse_content_type"] = request.content_type
@@ -745,16 +767,19 @@ async def test_preview_parsed_url_returns_expected_preview_payload(
             source_url=request.source_url,
             byte_length=len(request.content),
             char_length=20,
+            parser_name="test-pdf-parser",
+            parser_version="test-1",
         )
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
     monkeypatch.setattr(ingestion_service, "parse_document", fake_parse_document)
 
-    result = await ingestion_service.preview_parsed_url(
-        url="https://example.com/file.pdf",
-        client=object(),
-        app_settings=runtime_settings,
-    )
+    async with httpx.AsyncClient() as client:
+        result = await ingestion_service.preview_parsed_url(
+            url=_url("https://example.com/file.pdf"),
+            client=client,
+            app_settings=runtime_settings,
+        )
 
     assert result.url == "https://example.com/file.pdf"
     assert result.status_code == 200
@@ -780,7 +805,7 @@ async def test_preview_url_maps_timeout_exception_to_504(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         _url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -793,11 +818,12 @@ async def test_preview_url_maps_timeout_exception_to_504(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await ingestion_service.preview_url(
-            url="https://example.com",
-            client=object(),
-        )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.preview_url(
+                url=_url("https://example.com"),
+                client=client,
+            )
 
     assert exc_info.value.status_code == 504
     assert str(exc_info.value.detail) == ingestion_service.ERROR_TIMEOUT
@@ -808,7 +834,7 @@ async def test_preview_url_maps_http_status_error_to_502_with_upstream_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         _url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -826,11 +852,12 @@ async def test_preview_url_maps_http_status_error_to_502_with_upstream_code(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await ingestion_service.preview_url(
-            url="https://example.com",
-            client=object(),
-        )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.preview_url(
+                url=_url("https://example.com"),
+                client=client,
+            )
 
     assert exc_info.value.status_code == 502
     assert str(exc_info.value.detail) == "URL returned HTTP 503"
@@ -841,7 +868,7 @@ async def test_preview_url_maps_network_error_to_502(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         _url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -854,11 +881,12 @@ async def test_preview_url_maps_network_error_to_502(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await ingestion_service.preview_url(
-            url="https://example.com",
-            client=object(),
-        )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.preview_url(
+                url=_url("https://example.com"),
+                client=client,
+            )
 
     assert exc_info.value.status_code == 502
     assert str(exc_info.value.detail) == ingestion_service.ERROR_FETCH_FAILED
@@ -869,7 +897,7 @@ async def test_preview_url_maps_asyncio_timeout_to_504(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_fetch_url(
-        _client: object,
+        _client: httpx.AsyncClient,
         _url: str,
         method: str = "GET",
         url_timeout: float | None = None,
@@ -881,11 +909,12 @@ async def test_preview_url_maps_asyncio_timeout_to_504(
 
     monkeypatch.setattr(ingestion_service, "fetch_url", fake_fetch_url)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await ingestion_service.preview_url(
-            url="https://example.com",
-            client=object(),
-        )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await ingestion_service.preview_url(
+                url=_url("https://example.com"),
+                client=client,
+            )
 
     assert exc_info.value.status_code == 504
     assert str(exc_info.value.detail) == ingestion_service.ERROR_TIMEOUT
@@ -906,64 +935,38 @@ async def test_fetch_url_limits_same_host_concurrency(
     peak_in_flight = 0
     lock = asyncio.Lock()
 
-    class _FakeResponse:
-        def __init__(self) -> None:
-            self.is_redirect = False
-            self.headers: dict[str, str] = {}
-            self.status_code = 200
-            self._content = b""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak_in_flight
 
-        def raise_for_status(self) -> None:
-            return None
+        async with lock:
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
 
-        async def aiter_bytes(self):
-            yield b"ok"
+        await asyncio.sleep(0.02)
 
-        async def aclose(self) -> None:
-            return None
+        async with lock:
+            in_flight -= 1
 
-    class _FakeClient:
-        def build_request(
-            self,
-            method: str,
-            url: httpx.URL,
-            headers: dict[str, str],
-            extensions: dict[str, str],
-        ) -> httpx.Request:
-            return httpx.Request(method, url, headers=headers, extensions=extensions)
-
-        async def send(
-            self,
-            request: httpx.Request,
-            stream: bool = True,
-        ) -> _FakeResponse:
-            nonlocal in_flight, peak_in_flight
-            assert stream is True
-
-            async with lock:
-                in_flight += 1
-                peak_in_flight = max(peak_in_flight, in_flight)
-
-            await asyncio.sleep(0.02)
-
-            async with lock:
-                in_flight -= 1
-
-            return _FakeResponse()
-
-    client = _FakeClient()
-
-    urls = [f"https://example.com/item-{i}" for i in range(6)]
-    await asyncio.gather(
-        *(
-            fetching_service.fetch_url(
-                client,
-                url,
-                app_settings=runtime_settings,
-            )
-            for url in urls
+        return httpx.Response(
+            status_code=200,
+            content=b"ok",
+            request=request,
         )
-    )
+
+    transport = httpx.MockTransport(handler)
+    urls = [f"https://example.com/item-{i}" for i in range(6)]
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        await asyncio.gather(
+            *(
+                fetching_service.fetch_url(
+                    client,
+                    url,
+                    app_settings=runtime_settings,
+                )
+                for url in urls
+            )
+        )
 
     assert peak_in_flight == 2
 
@@ -985,73 +988,50 @@ async def test_fetch_url_allows_parallelism_across_different_hosts(
     total_peak = 0
     lock = asyncio.Lock()
 
-    class _FakeResponse:
-        def __init__(self) -> None:
-            self.is_redirect = False
-            self.headers: dict[str, str] = {}
-            self.status_code = 200
-            self._content = b""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal total_in_flight, total_peak
+        host = request.headers["Host"].split(":")[0]
 
-        def raise_for_status(self) -> None:
-            return None
+        async with lock:
+            host_in_flight[host] = host_in_flight.get(host, 0) + 1
+            host_peak[host] = max(
+                host_peak.get(host, 0),
+                host_in_flight[host],
+            )
+            total_in_flight += 1
+            total_peak = max(total_peak, total_in_flight)
 
-        async def aiter_bytes(self):
-            yield b"ok"
+        await asyncio.sleep(0.02)
 
-        async def aclose(self) -> None:
-            return None
+        async with lock:
+            host_in_flight[host] -= 1
+            total_in_flight -= 1
 
-    class _FakeClient:
-        def build_request(
-            self,
-            method: str,
-            url: httpx.URL,
-            headers: dict[str, str],
-            extensions: dict[str, str],
-        ) -> httpx.Request:
-            return httpx.Request(method, url, headers=headers, extensions=extensions)
+        return httpx.Response(
+            status_code=200,
+            content=b"ok",
+            request=request,
+        )
 
-        async def send(
-            self,
-            request: httpx.Request,
-            stream: bool = True,
-        ) -> _FakeResponse:
-            nonlocal total_in_flight, total_peak
-            assert stream is True
-            host = request.headers["Host"].split(":")[0]
-
-            async with lock:
-                host_in_flight[host] = host_in_flight.get(host, 0) + 1
-                host_peak[host] = max(host_peak.get(host, 0), host_in_flight[host])
-                total_in_flight += 1
-                total_peak = max(total_peak, total_in_flight)
-
-            await asyncio.sleep(0.02)
-
-            async with lock:
-                host_in_flight[host] -= 1
-                total_in_flight -= 1
-
-            return _FakeResponse()
-
-    client = _FakeClient()
-
+    transport = httpx.MockTransport(handler)
     urls = [
         "https://host-a.test/a1",
         "https://host-b.test/b1",
         "https://host-a.test/a2",
         "https://host-b.test/b2",
     ]
-    await asyncio.gather(
-        *(
-            fetching_service.fetch_url(
-                client,
-                url,
-                app_settings=runtime_settings,
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        await asyncio.gather(
+            *(
+                fetching_service.fetch_url(
+                    client,
+                    url,
+                    app_settings=runtime_settings,
+                )
+                for url in urls
             )
-            for url in urls
         )
-    )
 
     assert host_peak.get("host-a.test") == 1
     assert host_peak.get("host-b.test") == 1
